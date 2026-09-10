@@ -1,0 +1,73 @@
+* tasks
+
+** put the .sh files in a bin/ dir so I can put them on PATH; remove .sh suffix.
+
+** move the files copied into image into their own dir
+Dockerfile COPY-s some files into image:
+
+    CLAUDE-TEMPLATE.md          ->  ~/.claude/CLAUDE.md
+    gitconfig                   ->  ~/.gitconfig
+    claude-settings-json.json   ->  ~/.claude/settings.json
+
+put these into their own directory. if that dir structure mirrors the intended layout in
+image, can I use just one COPY instead of one per file?
+
+** build a convenient sandbox-exec command-line wrapper
+name (maybe): devbox?
+purpose: allow me to interact with a repo on macOS with less trust.
+
+example threats I'd like to defend against, at least a little:
+- malicious git hooks etc authored by prompt-injected LLM
+- malicious dependency/supply chain attack
+- honest mistakes in LLM- or human-written code
+
+defaults:
+
+- read/write access to cwd.
+
+- no network access. want a flag (--network=yes, --network=no) to control this.
+
+- read access to some reasonable selection of system dirs so I can run commands.
+
+- read access to some reasonable subset of my homedir so eg `git` still works; my current
+  ~/.claude/settings.json sandbox block might be helpful as a starting point:
+
+    "filesystem": {
+      "denyRead": [
+        "~/",
+        "/Users/"
+      ],
+      "allowRead": [
+        "~/.gitconfig",
+        "~/.gitexclude",
+        "~/.rustup/",
+        "~/.cargo/"
+      ]
+
+problem:
+- what about git push/pull? needs network. if I give it network, how do I defend against
+  exfiltration of eg github credentials? seems hard. solve this later; any sandbox is an
+  improvement over no sandbox.
+
+* future ideas
+
+** consider converting claudebox.sh to python if it gets more complex
+
+** container lifetime defaults
+
+now: claudebox.sh runs a long-lived container.
+alternatives:
+
+- `container run --rm` so it's transient.
+
+- `container start` so it doesn't sleep when I leave the session. I often find myself
+  "exec bash"-ing in to the container. If I unexpectedly ctrl-D out of the `container run`
+  session, the container stops and I lose state.
+
+- cache/reuse containers according to the working directory.
+
+** github permissions convenience
+
+would be nice to have a better way to grant tightly scoped github permissions than manually generating PATs.
+- make a GH app?
+- other options?
