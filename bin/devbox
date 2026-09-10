@@ -1,0 +1,256 @@
+#!/bin/bash
+
+# Run a command against the current directory under a macOS sandbox, so that
+# repo-supplied code -- git hooks, build scripts, dependencies -- can't write
+# outside the repo, read the rest of your home directory, or talk to the
+# network. See DEVBOX.md for the threat model and the gaps.
+
+set -euo pipefail
+
+prog="$(basename "$0")"
+cwd="$(pwd -P)"
+
+usage() {
+    cat <<EOF
+usage: $prog [options] [--] [command [args...]]
+
+Runs command (default: \$SHELL) under a sandbox profile that allows writes only
+to the current directory and to temporary directories, denies reads of
+everything under /Users except an allowlist, and by default denies IP network
+access.
+
+options:
+  --network=yes|no      allow IP networking (default: no)
+  --allow-read PATH     also permit reads under PATH (repeatable)
+  --allow-write PATH    also permit writes under PATH (repeatable)
+  --print-profile       print the generated sandbox profile and exit
+  -h, --help            this
+
+Option parsing stops at the first non-option argument, so flags meant for the
+command need no --:  $prog cargo test --release
+EOF
+}
+
+# ---------- PLATFORM ----------
+# sandbox-exec is macOS-only, and deprecated-but-working. There is no
+# equivalent to fall back to, so bail rather than silently running unsandboxed:
+# a sandbox you think you have and don't is worse than none.
+if [[ "$(uname -s)" != Darwin ]]; then
+    echo "$prog: macOS only -- sandbox-exec doesn't exist on $(uname -s)." >&2
+    exit 1
+fi
+if [[ ! -x /usr/bin/sandbox-exec ]]; then
+    echo "$prog: /usr/bin/sandbox-exec is missing; nothing to sandbox with." >&2
+    exit 1
+fi
+
+# ---------- PATHS ----------
+
+# Absolute physical path. Directories resolve wholesale; anything else has its
+# parent resolved and the basename appended, so a path that doesn't exist yet
+# (a cache file a tool will create) still works. macOS has no portable
+# `readlink -f`, hence the shell version.
+resolve() {
+    local p="$1" dir base
+    case "$p" in
+        "~")   p="$HOME" ;;
+        "~/"*) p="$HOME/${p#\~/}" ;;
+    esac
+    if [[ -d "$p" ]]; then
+        (cd "$p" && pwd -P)
+        return
+    fi
+    dir="$(dirname "$p")"
+    base="$(basename "$p")"
+    if [[ ! -d "$dir" ]]; then
+        echo "$prog: no such directory: $dir" >&2
+        return 1
+    fi
+    dir="$(cd "$dir" && pwd -P)"
+    [[ "$dir" == "/" ]] && echo "/$base" || echo "$dir/$base"
+}
+
+# Profile paths are interpolated into a double-quoted SBPL string, and SBPL has
+# no way to express a literal quote or backslash inside one.
+reject_unquotable() {
+    case "$1" in
+        *'"'*|*'\'*|*$'\n'*)
+            echo "$prog: refusing path with a quote, backslash or newline: $1" >&2
+            return 1
+            ;;
+    esac
+}
+
+# ---------- ARGUMENTS ----------
+
+network=no
+extra_read=()
+extra_write=()
+print_profile=no
+
+while (( $# )); do
+    case "$1" in
+        --network) network="${2-}"; shift $(( $# > 1 ? 2 : 1 )) ;;
+        --network=*) network="${1#--network=}"; shift ;;
+        --allow-read) extra_read+=("${2-}"); shift $(( $# > 1 ? 2 : 1 )) ;;
+        --allow-read=*) extra_read+=("${1#--allow-read=}"); shift ;;
+        --allow-write) extra_write+=("${2-}"); shift $(( $# > 1 ? 2 : 1 )) ;;
+        --allow-write=*) extra_write+=("${1#--allow-write=}"); shift ;;
+        --print-profile) print_profile=yes; shift ;;
+        -h|--help) usage; exit 0 ;;
+        --) shift; break ;;
+        -*) echo "$prog: unknown option ‘$1’ (see --help)." >&2; exit 1 ;;
+        *) break ;;
+    esac
+done
+
+case "$network" in
+    yes|no) ;;
+    *) echo "$prog: --network takes ‘yes’ or ‘no’, not ‘${network}’." >&2; exit 1 ;;
+esac
+
+# Vet the paths you asked for up front. An unresolvable allowlist entry would
+# otherwise be dropped and reappear later as a mysterious denial.
+check_allow() {
+    local flag="$1" p
+    shift
+    for p in "$@"; do
+        if [[ -z "$p" ]]; then
+            echo "$prog: $flag needs a path." >&2
+            exit 1
+        fi
+        resolve "$p" >/dev/null
+    done
+}
+check_allow --allow-read ${extra_read[@]+"${extra_read[@]}"}
+check_allow --allow-write ${extra_write[@]+"${extra_write[@]}"}
+
+if (( $# )); then
+    cmd=("$@")
+else
+    cmd=("${SHELL:-/bin/bash}")
+fi
+
+# ---------- WORKING DIRECTORY MUST BE REASONABLE ----------
+# The whole point is that one directory is writable, so a home directory or the
+# root of the filesystem is not a useful choice: mount a project.
+
+case "$cwd" in
+    /Users/*/*) ;;  # somewhere inside a home directory: fine
+    /|/Users|/Users/*)
+        echo "$prog: refusing to run with ‘${cwd}’ writable: cd to a project directory, not a home directory or the root of the filesystem." >&2
+        exit 1
+        ;;
+esac
+reject_unquotable "$cwd"
+
+# ---------- WHAT THE SANDBOX ALLOWS ----------
+# Read access to the toolchain configuration that dev tools need in order to
+# work at all. Everything else under /Users stays unreadable. Cargo's and npm's
+# shared caches are deliberately *not* writable -- see DEVBOX.md.
+
+default_read=(
+    "$HOME/.gitconfig"
+    "$HOME/.gitexclude"
+    "$HOME/.config/git"
+    "$HOME/.rustup"
+    "$HOME/.cargo"
+)
+
+# To run a command you have to be able to read it. Homebrew and the system
+# prefixes are readable anyway; this is for tools installed under $HOME, like
+# ~/.local/bin/claude. The containing directory, not just the binary, because
+# wrappers commonly exec a sibling.
+cmd_path="$(command -v -- "${cmd[0]}" 2>/dev/null || true)"
+if [[ -n "$cmd_path" && "$cmd_path" == /* ]]; then
+    default_read+=("$(dirname "$cmd_path")")
+fi
+
+# Scratch space. $TMPDIR is a per-user directory under /private/var/folders,
+# which also holds per-user caches; /tmp and /var/tmp are world-writable
+# already, so permitting them concedes nothing.
+default_write=(
+    /private/var/folders
+    /private/tmp
+    /private/var/tmp
+)
+
+# One SBPL filter line per path, resolved and vetted. subpath matches the path
+# itself as well as anything under it, so it covers plain files too.
+filters() {
+    local p resolved
+    for p in "$@"; do
+        # A path that doesn't exist is not an error here: allowlists name
+        # things like caches that a tool may create later, and permitting a
+        # path that never appears costs nothing.
+        resolved="$(resolve "$p" 2>/dev/null)" || continue
+        reject_unquotable "$resolved" || exit 1
+        printf '       (subpath "%s")\n' "$resolved"
+    done
+}
+
+read_filters="$(filters "$cwd" "${default_read[@]}" ${extra_read[@]+"${extra_read[@]}"})"
+write_filters="$(filters "$cwd" "${default_write[@]}" ${extra_write[@]+"${extra_write[@]}"})"
+
+# ---------- THE PROFILE ----------
+# SBPL is last-match-wins, so every deny below is followed by the allows that
+# carve holes in it; reordering them silently changes the meaning.
+#
+# This starts from (allow default) and takes away the three things that matter
+# for the threat model. A deny-by-default profile is stronger, but needs a
+# large allowlist of mach services, sysctls and system paths before ordinary
+# dev tools will run, and breaks whenever macOS moves something. See DEVBOX.md.
+
+profile="(version 1)
+(allow default)
+
+;; ---- writes: the working directory and scratch space, nothing else ----
+(deny file-write*)
+(allow file-write*
+$write_filters)
+;; The character devices everything expects to be able to write to.
+(allow file-write*
+       (literal \"/dev/null\")
+       (literal \"/dev/zero\")
+       (literal \"/dev/random\")
+       (literal \"/dev/urandom\")
+       (literal \"/dev/dtracehelper\")
+       (literal \"/dev/tty\")
+       (subpath \"/dev/fd\")
+       (regex #\"^/dev/ttys[0-9]+\"))
+
+;; ---- reads: home directory closed, with an allowlist ----
+(deny file-read* (subpath \"/Users\"))
+;; Metadata only, so that stat()ing \$HOME and walking up to it still works
+;; while the contents stay unreadable.
+(allow file-read-metadata (subpath \"/Users\"))
+(allow file-read*
+$read_filters)"
+
+if [[ "$network" == no ]]; then
+    profile="$profile
+
+;; ---- network: no IP, unix sockets kept ----
+;; Unix-domain sockets are matched by path rather than by address, so allowing
+;; the directories they live in keeps local services (syslog, the DNS resolver,
+;; pasteboard helpers) working while every IP address stays unreachable.
+(deny network*)
+(allow network*
+       (subpath \"/private/var/run\")
+       (subpath \"/private/tmp\")
+       (subpath \"/private/var/folders\"))"
+fi
+
+if [[ "$print_profile" == yes ]]; then
+    printf '%s\n' "$profile"
+    exit 0
+fi
+
+# Marks the shell as sandboxed for anyone who wants to say so in their prompt.
+export DEVBOX=1
+
+if [[ -t 2 ]]; then
+    echo "$prog: ‘${cwd}’ writable, network ${network}, reads outside the allowlist denied." >&2
+fi
+
+exec /usr/bin/sandbox-exec -p "$profile" "${cmd[@]}"
