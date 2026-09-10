@@ -1,6 +1,6 @@
 # Build caching is problematic
 
-**TL;DR.** The Dockerfile deliberately doesn't pin Node or Rust — both resolve to the current LTS/stable at build time. But a layer's cache key is computed from the *text* of the instruction, never from what the command fetches, so those layers hash to the same key forever and BuildKit reuses them without ever re-running the `curl` that would find a newer version. The result is accidental pinning: the image is stuck on whatever was current the last time that layer genuinely built, with nothing in git recording which version that was — no freshness *and* no reproducibility. Worse, `container image rm claude` is not on its own enough, because the build cache lives in the builder VM rather than the image store, so deleting the image and rebuilding just reconstructs it from the same stale layers. `claudebox.sh` therefore passes `--no-cache`; reach for that flag too when building by hand.
+**TL;DR.** The Dockerfile deliberately doesn't pin Node or Rust — both resolve to the current LTS/stable at build time. But a layer's cache key is computed from the *text* of the instruction, never from what the command fetches, so those layers hash to the same key forever and BuildKit reuses them without ever re-running the `curl` that would find a newer version. The result is accidental pinning: the image is stuck on whatever was current the last time that layer genuinely built, with nothing in git recording which version that was — no freshness *and* no reproducibility. Worse, `container image rm claude` is not on its own enough, because the build cache lives in the builder VM rather than the image store, so deleting the image and rebuilding just reconstructs it from the same stale layers. `claudebox` therefore passes `--no-cache`; reach for that flag too when building by hand.
 
 ## The mechanism
 
@@ -34,7 +34,7 @@ container image rm claude && container build --tag claude
 
 deletes the image and then reconstructs it from the same cached layers. Feels like a clean rebuild; isn't one. You need `container build --no-cache`, or a targeted cache-bust.
 
-This is why `claudebox.sh` builds with `--no-cache`. Deleting the image and re-running `./claudebox.sh` is a genuine fresh build; the trap above only applies when invoking `container build` directly.
+This is why `claudebox` builds with `--no-cache`. Deleting the image and re-running `claudebox` is a genuine fresh build; the trap above only applies when invoking `container build` directly.
 
 The same applies to `RUN curl -fsSL https://claude.ai/install.sh | bash` — that layer pins the Claude Code version the same way. Less critical, since the installed binary self-updates at runtime, but a from-scratch build on a cold cache will pull a much newer Claude than a cache-hit build.
 
@@ -42,7 +42,7 @@ The same applies to `RUN curl -fsSL https://claude.ai/install.sh | bash` — tha
 
 Roughly in order of preference:
 
-1. **Leave it, and use `--no-cache` when you want fresh.** This is what we do: `claudebox.sh` passes `--no-cache`, so `image rm` plus a normal launch refreshes everything. The cost is that a rebuild redoes the expensive apt layer (emacs, build-essential) too.
+1. **Leave it, and use `--no-cache` when you want fresh.** This is what we do: `claudebox` passes `--no-cache`, so `image rm` plus a normal launch refreshes everything. The cost is that a rebuild redoes the expensive apt layer (emacs, build-essential) too.
 
 2. **Cache-bust argument** on just the volatile layers:
 
