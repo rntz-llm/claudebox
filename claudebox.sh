@@ -50,8 +50,8 @@ fi
 if container image list | grep -q '^claude\b'; then
     echo "Image ‘claude’ already built, reusing."
 else
-    echo "Building ‘claude’ image..."
-    (cd "$script_dir" && container build --tag claude)
+    echo "Building ‘claude’ image fresh, without caching..."
+    (cd "$script_dir" && container build --no-cache --tag claude)
     echo "... built ‘claude’ image!"
     echo
 fi
