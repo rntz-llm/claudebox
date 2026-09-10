@@ -75,16 +75,17 @@ rustflags = ["-C", "link-arg=-fuse-ld=mold"]
 TOML
 ENV TERM xterm-256color
 
-# home/ mirrors the layout it lands in, so one COPY places all of it:
-#
-#     home/.claude/CLAUDE.md      Claude's instructions inside the container
-#     home/.claude/settings.json  Claude's settings inside the container
-#     home/.gitconfig             `gh` as the github credential helper
-#
-# The gitconfig contains no secrets: `gh auth git-credential` reads from gh's
-# own config, so the container still needs `gh auth login` or a GH_TOKEN passed
-# through `container run --env`.
-COPY --chown=agent:agent home/ ./
+# image/ holds the files copied into the image, one COPY each. Their names
+# there are deliberately not the names they land under: a repo file called
+# CLAUDE.md would read as instructions to an agent working on claudebox
+# itself, and one called .gitconfig gets bind-mounted read-only by Claude
+# Code's sandbox, which makes it uneditable and undeletable.
+COPY --chown=agent:agent image/CLAUDE-TEMPLATE.md .claude/CLAUDE.md
+COPY --chown=agent:agent image/claude-settings-json.json .claude/settings.json
+# `gh` as the github credential helper. Contains no secrets: `gh auth
+# git-credential` reads from gh's own config, so the container still needs
+# `gh auth login` or a GH_TOKEN passed through `container run --env`.
+COPY --chown=agent:agent image/gitconfig .gitconfig
 # Identity comes from the host's git config, passed by buildbox.sh.
 ARG GIT_USER_NAME=
 ARG GIT_USER_EMAIL=
