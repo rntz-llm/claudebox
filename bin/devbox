@@ -52,6 +52,8 @@ fi
 # `readlink -f`, hence the shell version.
 resolve() {
     local p="$1" dir base
+    # A literal tilde, from a quoted argument the shell didn't expand.
+    # shellcheck disable=SC2088
     case "$p" in
         "~")   p="$HOME" ;;
         "~/"*) p="$HOME/${p#\~/}" ;;
@@ -73,6 +75,7 @@ resolve() {
 # Profile paths are interpolated into a double-quoted SBPL string, and SBPL has
 # no way to express a literal quote or backslash inside one.
 reject_unquotable() {
+    # shellcheck disable=SC1003  # '\' is a literal backslash, as intended
     case "$1" in
         *'"'*|*'\'*|*$'\n'*)
             echo "$prog: refusing path with a quote, backslash or newline: $1" >&2
