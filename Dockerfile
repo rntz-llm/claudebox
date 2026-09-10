@@ -27,18 +27,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     buildah crun \
     && rm -rf /var/lib/apt/lists/*
 
-# buildah lets an agent check that a Dockerfile change actually builds, which
-# is otherwise unverifiable from in here. It only works as root and outside
-# Claude's bash sandbox: the sandbox blocks nested user namespaces, and even
-# outside it the VM refuses to let an unprivileged user write uid_map, so
-# rootless buildah falls back to single-ID mapping and any COPY --chown to a
-# non-zero uid fails. crun is only a Recommends, hence listed explicitly;
-# without it buildah has no OCI runtime for RUN steps.
-#
-#     sudo buildah build --storage-driver vfs --isolation chroot -t check .
-#
 # ~120MB for buildah plus ~40MB for shellcheck is a real chunk of this image;
-# both are here because this repo is a Dockerfile and a pile of shell scripts.
+# consider removing once claudebox's image is more stable.
 
 # Debian names the fd binary `fdfind`; everyone (including Claude) types `fd`.
 RUN ln -s /usr/bin/fdfind /usr/local/bin/fd
