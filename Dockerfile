@@ -81,7 +81,7 @@ COPY --chown=agent:agent claude-settings-json.json .claude/settings.json
 # git-credential` reads from gh's own config, so the container still needs
 # `gh auth login` or a GH_TOKEN passed through `container run --env`.
 COPY --chown=agent:agent gitconfig .gitconfig
-# Identity comes from the host's git config, passed by buildbox.sh.
+# Identity comes from the host's git config, passed by bin/buildbox.
 ARG GIT_USER_NAME=
 ARG GIT_USER_EMAIL=
 RUN if [ -n "$GIT_USER_NAME" ]; then git config --global user.name "$GIT_USER_NAME"; fi; \

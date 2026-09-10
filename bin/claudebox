@@ -8,7 +8,7 @@ cwd="$(pwd -P)"
 # ---------- WORKSPACE (CURRENT) DIRECTORY MUST BE REASONABLE ----------
 # 1. No commas or equals signs (they'd break --mount's option syntax).
 # 2. No home dirs or parents of homedirs.
-# 3. Not the claudebox.sh directory or one of its ancestors.
+# 3. Doesn't contain claudebox's own scripts.
 # 4. Must be owned by current user.
 
 if [[ "$cwd" == *[,=]* ]]; then
@@ -23,11 +23,7 @@ is_same_or_ancestor() {
 }
 
 if is_same_or_ancestor "$cwd" "$script_dir"; then
-    if [[ "$cwd" == "$script_dir" ]]; then
-        echo "Refusing to mount claudebox.sh's own directory as /workspace." >&2
-    else
-        echo "Refusing to mount ‘${cwd}’ as /workspace: it contains claudebox.sh's own directory." >&2
-    fi
+    echo "Refusing to mount ‘${cwd}’ as /workspace: it contains claudebox's own scripts." >&2
     exit 1
 fi
 
@@ -53,7 +49,7 @@ else
     # --no-cache because the Dockerfile pins neither node nor rust, and a cached
     # layer would keep whatever version it first resolved. See
     # BUILD_CACHING_IS_PROBLEMATIC.md.
-    "$script_dir/buildbox.sh" --no-cache
+    "$script_dir/buildbox" --no-cache
 fi
 
 container_options=(

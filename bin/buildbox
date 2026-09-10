@@ -2,9 +2,10 @@
 
 set -euo pipefail
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# The build context is the repo root, one level up from bin/.
+repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 
-# Always builds; claudebox.sh only calls this when the image is missing, but run
+# Always builds; claudebox only calls this when the image is missing, but run
 # directly this is how you rebuild on demand. Extra arguments are passed through
 # to `container build` -- `--no-cache` and `--progress plain` are the useful
 # ones; see BUILD_CACHING_IS_PROBLEMATIC.md for why you usually want the former.
@@ -18,6 +19,6 @@ build_options=(
 
 echo "Building ‘claude’ image..."
 echo container build "${build_options[@]}" "$@"
-(cd "$script_dir" && container build "${build_options[@]}" "$@")
+(cd "$repo_dir" && container build "${build_options[@]}" "$@")
 echo "... built ‘claude’ image!"
 echo
