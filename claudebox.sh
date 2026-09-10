@@ -62,14 +62,31 @@ container_options=(
     --mount "type=bind,source=$cwd,target=/workspace"
 )
 
-# TODO: let user supply a name via --name.
-for n in claude claude2 claude3; do
-    if ! container inspect "$n" >/dev/null 2>&1; then
-        echo "Container name: ‘${n}’"
-        container_options+=(--name "$n")
-        break
-    fi
+# Arguments are passed through untouched, --name included: if you supplied one
+# that's the name, and a name that's already taken is `container run`'s
+# complaint to make, not ours. Only when there's no --name do we pick one, so
+# that concurrent boxes don't collide.
+name_given=no
+for arg in "$@"; do
+    case "$arg" in
+        --name|--name=*) name_given=yes; break ;;
+    esac
 done
+
+if [[ "$name_given" == no ]]; then
+    for candidate in claude claude{1..99}; do
+        if ! container inspect "$candidate" >/dev/null 2>&1; then
+            name="$candidate"
+            break
+        fi
+    done
+    if [[ -z "${name:-}" ]]; then
+        echo "Refusing to run: ‘claude’ through ‘claude99’ are all taken; pass --name." >&2
+        exit 1
+    fi
+    echo "Container name: ‘${name}’"
+    container_options+=(--name "$name")
+fi
 
 # Not echoing b/c "-e GH_TOKEN=..." is common, don't want that PAT displayed.
 #echo container run "${container_options[@]}" "$@" claude
