@@ -75,12 +75,16 @@ rustflags = ["-C", "link-arg=-fuse-ld=mold"]
 TOML
 ENV TERM xterm-256color
 
-COPY --chown=agent:agent CLAUDE-TEMPLATE.md .claude/CLAUDE.md
-COPY --chown=agent:agent claude-settings-json.json .claude/settings.json
-# `gh` as the github credential helper. Contains no secrets: `gh auth
-# git-credential` reads from gh's own config, so the container still needs
-# `gh auth login` or a GH_TOKEN passed through `container run --env`.
-COPY --chown=agent:agent gitconfig .gitconfig
+# home/ mirrors the layout it lands in, so one COPY places all of it:
+#
+#     home/.claude/CLAUDE.md      Claude's instructions inside the container
+#     home/.claude/settings.json  Claude's settings inside the container
+#     home/.gitconfig             `gh` as the github credential helper
+#
+# The gitconfig contains no secrets: `gh auth git-credential` reads from gh's
+# own config, so the container still needs `gh auth login` or a GH_TOKEN passed
+# through `container run --env`.
+COPY --chown=agent:agent home/ ./
 # Identity comes from the host's git config, passed by buildbox.sh.
 ARG GIT_USER_NAME=
 ARG GIT_USER_EMAIL=
