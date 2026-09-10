@@ -6,10 +6,6 @@
   "sandbox": {
     "enabled": true,
     "autoAllowBashIfSandboxed": true,
-    "enableWeakerNestedSandbox": true,
-    "filesystem": {
-      "denyWrite": ["~/.claude", "~/.claude.json"],
-      "denyRead": ["~/.claude", "~/.claude.json"]
-    }
+    "enableWeakerNestedSandbox": true
   }
 }

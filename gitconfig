@@ -1,5 +1,3 @@
-# Identity is not here on purpose: claudebox.sh reads it from the host's git
-# config at build time, so it needn't live in a public repo. See the Dockerfile.
 [credential "https://github.com"]
       helper =
       helper = !/usr/bin/gh auth git-credential
