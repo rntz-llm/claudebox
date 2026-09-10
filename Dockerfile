@@ -10,6 +10,7 @@ FROM debian:stable-slim
 # patch file tree rsync             misc dev
 # build-essential pkg-config        c/rust dev
 # libssl-dev                        common native crate dependency
+# mold                              fast linker, used for rust
 # unzip xz-utils zstd               archives
 # python3 python3-venv pipx         python dev
 # vim-tiny                          backup editor ($EDITOR, git)
@@ -18,7 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates bubblewrap curl git less procps python3 socat sudo \
     openssh-client gh \
     vim-tiny emacs-nox ripgrep fd-find jq \
-    build-essential pkg-config libssl-dev \
+    build-essential pkg-config libssl-dev mold \
     unzip xz-utils zstd patch file tree rsync \
     python3-venv pipx \
     && rm -rf /var/lib/apt/lists/*
@@ -58,11 +59,20 @@ RUN curl -fsSL https://claude.ai/install.sh | bash
 ENV PATH "/home/agent/.local/bin:${PATH}"
 
 # Rust via rustup, not apt: Debian's rustc lags and can't switch toolchains.
-# rust-analyzer + rust-src are what make editors/LSP useful; drop them to save ~150MB.
+# clippy and rustfmt only -- rust-analyzer (42MB) is an LSP server nothing in
+# here drives, and rust-src (82MB) exists mostly to feed it.
+# --component takes one comma-separated value, not a space-separated list.
 RUN curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
     | sh -s -- -y --no-modify-path --profile minimal \
-      --component clippy,rustfmt,rust-src,rust-analyzer
+      --component clippy,rustfmt
 ENV PATH "/home/agent/.cargo/bin:${PATH}"
+
+# Link with mold; agents iterate on cargo build/test a lot and linking is the
+# slow tail of each one. cfg() keeps this arch-agnostic.
+RUN mkdir -p /home/agent/.cargo && cat > /home/agent/.cargo/config.toml <<'TOML'
+[target.'cfg(target_os = "linux")']
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+TOML
 ENV TERM xterm-256color
 
 COPY --chown=agent:agent CLAUDE-TEMPLATE.md .claude/CLAUDE.md
