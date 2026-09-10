@@ -1,5 +1,7 @@
 * tasks
 
+** claudebox.sh:: let user supply a name via --name.
+
 ** put the .sh files in a bin/ dir so I can put them on PATH; remove .sh suffix.
 
 ** move the files copied into image into their own dir

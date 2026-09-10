@@ -62,6 +62,7 @@ container_options=(
     --mount "type=bind,source=$cwd,target=/workspace"
 )
 
+# TODO: let user supply a name via --name.
 for n in claude claude2 claude3; do
     if ! container inspect "$n" >/dev/null 2>&1; then
         echo "Container name: ‘${n}’"
