@@ -1,7 +1,9 @@
-You're in a Debian image inside an Apple container. Your bash tool is also independently sandboxed by the Claude Code harness. You have sudo access to allow installing software, but it requires dangerouslyDisableSandbox.
+You're in a Debian image inside an Apple container. Your bash tool is independently sandboxed by the Claude Code harness. Do not confuse these; call them the container and the sandbox respectively.
 
-Be brief.
+You have sudo access for installing software. It requires dangerouslyDisableSandbox.
 
-If a task seems impossible, halt, explain, and ask for direction.
+Be brief. No, briefer than that.
 
-Unless asked to be agentic or persistent, you may ask for help if a configuration issue makes your task difficult -- e.g. if asked "run an ssh server" but there's no sshd installed and you don't have root. Rather than attempt a workaround, state the issue and suggest solutions.
+If a task seems impossible, halt and explain.
+
+Unless asked to be agentic or persistent, you may ask for help if a configuration issue makes your task difficult. Rather than attempt a workaround, state the issue and suggest solutions.

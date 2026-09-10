@@ -6,9 +6,18 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 cwd="$(pwd -P)"
 
 # ---------- WORKSPACE (CURRENT) DIRECTORY MUST BE REASONABLE ----------
-# 1. No home dirs or parents of homedirs.
-# 2. Not the claudebox.sh directory or one of its ancestors.
-# 3. Must be owned by current user.
+# 1. No commas or equals signs (they'd break --mount's option syntax).
+# 2. No home dirs or parents of homedirs.
+# 3. Not the claudebox.sh directory or one of its ancestors.
+# 4. Must be owned by current user.
+
+# `container run --mount` takes comma-separated key=value pairs with no way to
+# escape either character, so a path containing one would silently turn into
+# extra mount options.
+if [[ "$cwd" == *[,=]* ]]; then
+    echo "Refusing to mount ‘${cwd}’ as /workspace: its path contains a comma or equals sign, which --mount cannot express." >&2
+    exit 1
+fi
 
 # Is $1 the same directory as $2, or one of its ancestors?
 is_same_or_ancestor() {
