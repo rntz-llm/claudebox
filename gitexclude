@@ -1,0 +1,18 @@
+# Claude Code's sandbox bind-mounts these paths in the workspace, over /dev/null
+# or over the host's own copy, so git sees untracked irregular files and refuses
+# to stage anything: "can only add regular files, symbolic links or
+# git-directories". Ignoring them globally keeps `git add -A` and `git status`
+# usable; nothing can be written to them from inside the container anyway.
+# Already-tracked files are unaffected, and `git add -f` still works.
+/.bash_profile
+/.bashrc
+/.claude/
+/.gitconfig
+/.gitmodules
+/.idea
+/.mcp.json
+/.profile
+/.ripgreprc
+/.vscode
+/.zprofile
+/.zshrc
