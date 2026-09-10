@@ -2,7 +2,25 @@
 
 set -euo pipefail
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# Resolve the script path through symlinks before taking its directory. Without
+# this, invoking a symlink to this script -- the obvious thing to do once bin/
+# is meant to be on your PATH -- computes the wrong script_dir: the buildbox
+# lookup below misses, and worse, the containment check passes for a workspace
+# that really does hold these scripts. macOS has no portable `readlink -f`.
+script="${BASH_SOURCE[0]}"
+links=0
+while [[ -L "$script" ]]; do
+    if (( ++links > 40 )); then
+        echo "Refusing to run: ‘${BASH_SOURCE[0]}’ is more than 40 symlinks deep; a loop?" >&2
+        exit 1
+    fi
+    target="$(readlink "$script")"
+    case "$target" in
+        /*) script="$target" ;;
+        *)  script="$(cd "$(dirname "$script")" && pwd -P)/$target" ;;
+    esac
+done
+script_dir="$(cd "$(dirname "$script")" && pwd -P)"
 cwd="$(pwd -P)"
 
 # ---------- WORKSPACE (CURRENT) DIRECTORY MUST BE REASONABLE ----------
