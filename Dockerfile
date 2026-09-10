@@ -7,9 +7,14 @@ FROM debian:stable-slim
 # Claude installing stuff:  sudo
 # git/github:               git gh openssh-client
 # general shellery:         less procps
+# dev stuff:                gcc libc6-dev make
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates bubblewrap curl git less procps python3 socat sudo \
-    openssh-client gh \
+    ca-certificates curl \
+    socat bubblewrap \
+    sudo \
+    less procps python3 \
+    git gh openssh-client \
+    gcc libc6-dev make \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd -m -s /bin/bash agent \

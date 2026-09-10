@@ -11,9 +11,6 @@ cwd="$(pwd -P)"
 # 3. Not the claudebox.sh directory or one of its ancestors.
 # 4. Must be owned by current user.
 
-# `container run --mount` takes comma-separated key=value pairs with no way to
-# escape either character, so a path containing one would silently turn into
-# extra mount options.
 if [[ "$cwd" == *[,=]* ]]; then
     echo "Refusing to mount ‘${cwd}’ as /workspace: its path contains a comma or equals sign, which --mount cannot express." >&2
     exit 1
