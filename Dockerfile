@@ -1,21 +1,19 @@
-# also consider ubuntu
 FROM debian:stable-slim
 
 # PACKAGE PURPOSES
-# downloading stuff:        ca-certificates curl
-# Claude's sandbox:         bubblewrap socat
-# Claude installing stuff:  sudo
-# git/github:               git gh openssh-client
-# general shellery:         less procps
-# editor ($EDITOR, git):    vim-tiny
-# fast search (Claude):     ripgrep fd-find
-# JSON wrangling:           jq
-# C toolchain, Rust linker: build-essential pkg-config
-# native crate deps:        libssl-dev
-# archives:                 unzip xz-utils zstd
-# misc dev:                 patch file tree rsync
-# python envs/apps:         python3-venv pipx
-# real editor:              emacs-nox
+# ca-certificates curl              downloading stuff
+# bubblewrap socat                  Claude's sandbox
+# sudo                              Claude installing stuff
+# git gh openssh-client             git/github
+# less procps                       misc shellery
+# ripgrep fd-find jq                misc
+# patch file tree rsync             misc dev
+# build-essential pkg-config        c/rust dev
+# libssl-dev                        common native crate dependency
+# unzip xz-utils zstd               archives
+# python3 python3-venv pipx         python dev
+# vim-tiny                          backup editor ($EDITOR, git)
+# emacs-nox                         real editor
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates bubblewrap curl git less procps python3 socat sudo \
     openssh-client gh \
@@ -63,7 +61,7 @@ ENV PATH "/home/agent/.local/bin:${PATH}"
 # rust-analyzer + rust-src are what make editors/LSP useful; drop them to save ~150MB.
 RUN curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
     | sh -s -- -y --no-modify-path --profile minimal \
-      --component clippy rustfmt rust-src rust-analyzer
+      --component clippy,rustfmt,rust-src,rust-analyzer
 ENV PATH "/home/agent/.cargo/bin:${PATH}"
 ENV TERM xterm-256color
 
