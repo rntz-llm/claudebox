@@ -50,10 +50,10 @@ fi
 if container image list | grep -q '^claude\b'; then
     echo "Image ‘claude’ already built, reusing."
 else
-    echo "Building ‘claude’ image fresh, without caching..."
-    (cd "$script_dir" && container build --no-cache --tag claude)
-    echo "... built ‘claude’ image!"
-    echo
+    # --no-cache because the Dockerfile pins neither node nor rust, and a cached
+    # layer would keep whatever version it first resolved. See
+    # BUILD_CACHING_IS_PROBLEMATIC.md.
+    "$script_dir/buildbox.sh" --no-cache
 fi
 
 container_options=(

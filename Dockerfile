@@ -77,6 +77,16 @@ ENV TERM xterm-256color
 
 COPY --chown=agent:agent CLAUDE-TEMPLATE.md .claude/CLAUDE.md
 COPY --chown=agent:agent claude-settings-json.json .claude/settings.json
+# `gh` as the github credential helper. Contains no secrets: `gh auth
+# git-credential` reads from gh's own config, so the container still needs
+# `gh auth login` or a GH_TOKEN passed through `container run --env`.
+COPY --chown=agent:agent gitconfig .gitconfig
+# Identity comes from the host's git config, passed by claudebox.sh, to keep it
+# out of this public repo. Unset values are skipped rather than written empty.
+ARG GIT_USER_NAME=
+ARG GIT_USER_EMAIL=
+RUN if [ -n "$GIT_USER_NAME" ]; then git config --global user.name "$GIT_USER_NAME"; fi; \
+    if [ -n "$GIT_USER_EMAIL" ]; then git config --global user.email "$GIT_USER_EMAIL"; fi
 # Avoid prompting for trust of /workspace.
 RUN cat > /home/agent/.claude.json <<EOF
 {
