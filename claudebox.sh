@@ -70,5 +70,6 @@ for n in claude claude2 claude3; do
     fi
 done
 
-echo container run "${container_options[@]}" "$@" claude
+# Not echoing b/c "-e GH_TOKEN=..." is common, don't want that PAT displayed.
+#echo container run "${container_options[@]}" "$@" claude
 container run "${container_options[@]}" "$@" claude
