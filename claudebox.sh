@@ -5,6 +5,40 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 cwd="$(pwd -P)"
 
+# ---------- ARGUMENTS ----------
+# Everything is passed through to `container run` except --name, which we
+# consume: we have to know the name to check that it is free, and to pick one
+# ourselves when it is absent.
+
+name=""
+run_args=()
+while (( $# )); do
+    case "$1" in
+        --name)
+            if (( $# < 2 )); then
+                echo "--name needs an argument." >&2
+                exit 1
+            fi
+            name="$2"
+            shift 2
+            ;;
+        --name=*)
+            name="${1#--name=}"
+            shift
+            ;;
+        *)
+            run_args+=("$1")
+            shift
+            ;;
+    esac
+done
+
+if [[ -n "$name" && ! "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+    echo "Refusing to use ‘${name}’ as a container name: use letters, digits, ‘_’, ‘.’ and ‘-’, starting with a letter or digit." >&2
+    exit 1
+fi
+# ---------- END ARGUMENTS ----------
+
 # ---------- WORKSPACE (CURRENT) DIRECTORY MUST BE REASONABLE ----------
 # 1. No commas or equals signs (they'd break --mount's option syntax).
 # 2. No home dirs or parents of homedirs.
@@ -47,6 +81,29 @@ if [[ ! -O "$cwd" ]]; then
 fi
 # ---------- END WORKSPACE DIR CHECKS ----------
 
+# A name the user asked for is used as-is: silently running under a different
+# one defeats the point of asking. Without --name, take the first free
+# claude/claude2/... so concurrent boxes don't collide.
+if [[ -n "$name" ]]; then
+    if container inspect "$name" >/dev/null 2>&1; then
+        echo "Refusing to run: a container named ‘${name}’ already exists. Remove it with ‘container rm ${name}’, or pick another --name." >&2
+        exit 1
+    fi
+else
+    for i in "" $(seq 2 99); do
+        if ! container inspect "claude$i" >/dev/null 2>&1; then
+            name="claude$i"
+            break
+        fi
+    done
+    if [[ -z "$name" ]]; then
+        echo "Refusing to run: containers ‘claude’ through ‘claude99’ all exist. Remove some, or pass --name." >&2
+        exit 1
+    fi
+fi
+
+echo "Container name: ‘${name}’"
+
 if container image list | grep -q '^claude\b'; then
     echo "Image ‘claude’ already built, reusing."
 else
@@ -60,17 +117,9 @@ container_options=(
     --interactive
     --tty
     --mount "type=bind,source=$cwd,target=/workspace"
+    --name "$name"
 )
 
-# TODO: let user supply a name via --name.
-for n in claude claude2 claude3; do
-    if ! container inspect "$n" >/dev/null 2>&1; then
-        echo "Container name: ‘${n}’"
-        container_options+=(--name "$n")
-        break
-    fi
-done
-
 # Not echoing b/c "-e GH_TOKEN=..." is common, don't want that PAT displayed.
-#echo container run "${container_options[@]}" "$@" claude
-container run "${container_options[@]}" "$@" claude
+#echo container run "${container_options[@]}" "${run_args[@]}" claude
+container run "${container_options[@]}" ${run_args[@]+"${run_args[@]}"} claude
