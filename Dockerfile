@@ -16,19 +16,19 @@ FROM debian:stable-slim
 # vim-tiny                          backup editor ($EDITOR, git)
 # emacs-nox                         real editor
 # shellcheck                        linting the shell scripts in here
-# buildah crun                      checking Dockerfile changes; see below
+# buildah                           checking Dockerfile changes
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates bubblewrap curl git less procps python3 socat sudo \
     openssh-client gh \
     vim-tiny emacs-nox ripgrep fd-find jq \
     build-essential pkg-config libssl-dev mold \
     unzip xz-utils zstd patch file tree rsync \
-    python3-venv pipx shellcheck \
-    buildah crun \
+    python3-venv pipx shellcheck buildah \
     && rm -rf /var/lib/apt/lists/*
 
 # ~120MB for buildah plus ~40MB for shellcheck is a real chunk of this image;
-# consider removing once claudebox's image is more stable.
+# consider removing once claudebox's image is more stable. buildah needs no OCI
+# runtime here: only --isolation chroot works in this VM.
 
 # Debian names the fd binary `fdfind`; everyone (including Claude) types `fd`.
 RUN ln -s /usr/bin/fdfind /usr/local/bin/fd
