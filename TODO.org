@@ -1,20 +1,7 @@
 * tasks
 
-** claudebox.sh:: let user supply a name via --name.
-
-** put the .sh files in a bin/ dir so I can put them on PATH; remove .sh suffix.
-
-** move the files copied into image into their own dir
-Dockerfile COPY-s some files into image:
-
-    CLAUDE-TEMPLATE.md          ->  ~/.claude/CLAUDE.md
-    gitconfig                   ->  ~/.gitconfig
-    claude-settings-json.json   ->  ~/.claude/settings.json
-
-put these into their own directory. if that dir structure mirrors the intended layout in
-image, can I use just one COPY instead of one per file?
-
 ** build a convenient sandbox-exec command-line wrapper
+PR #6 open: bin/devbox + DEVBOX.md, written but never run on macOS.
 name (maybe): devbox?
 purpose: allow me to interact with a repo on macOS with less trust.
 
@@ -53,11 +40,11 @@ problem:
 
 * future ideas
 
-** consider converting claudebox.sh to python if it gets more complex
+** consider converting claudebox to python if it gets more complex
 
 ** container lifetime defaults
 
-now: claudebox.sh runs a long-lived container.
+now: claudebox runs a long-lived container.
 alternatives:
 
 - `container run --rm` so it's transient.
