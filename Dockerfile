@@ -80,6 +80,7 @@ RUN mkdir -p /home/agent/.cargo && cat > /home/agent/.cargo/config.toml <<'TOML'
 rustflags = ["-C", "link-arg=-fuse-ld=mold"]
 TOML
 ENV TERM xterm-256color
+ENV COLORTERM truecolor
 
 # image/ holds the files copied into the image, one COPY each. Their names
 # there are deliberately not the names they land under: a repo file called
