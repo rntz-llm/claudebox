@@ -96,7 +96,7 @@ COPY --chown=agent:agent image/gitconfig .gitconfig
 # Referenced by gitconfig's core.excludesFile. Hides the files the sandbox
 # bind-mounts into the workspace, which `git add -A` otherwise chokes on.
 COPY --chown=agent:agent image/gitexclude .gitexclude
-# Identity comes from the host's git config, passed by buildbox.sh.
+# Identity comes from the host's git config, passed by bin/buildbox.
 ARG GIT_USER_NAME=
 ARG GIT_USER_EMAIL=
 RUN if [ -n "$GIT_USER_NAME" ]; then git config --global user.name "$GIT_USER_NAME"; fi; \

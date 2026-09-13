@@ -2,13 +2,31 @@
 
 set -euo pipefail
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# Resolve the script path through symlinks before taking its directory. Without
+# this, invoking a symlink to this script -- the obvious thing to do once bin/
+# is meant to be on your PATH -- computes the wrong script_dir: the buildbox
+# lookup below misses, and worse, the containment check passes for a workspace
+# that really does hold these scripts. macOS has no portable `readlink -f`.
+script="${BASH_SOURCE[0]}"
+links=0
+while [[ -L "$script" ]]; do
+    if (( ++links > 40 )); then
+        echo "Refusing to run: ‘${BASH_SOURCE[0]}’ is more than 40 symlinks deep; a loop?" >&2
+        exit 1
+    fi
+    target="$(readlink "$script")"
+    case "$target" in
+        /*) script="$target" ;;
+        *)  script="$(cd "$(dirname "$script")" && pwd -P)/$target" ;;
+    esac
+done
+script_dir="$(cd "$(dirname "$script")" && pwd -P)"
 cwd="$(pwd -P)"
 
 # ---------- WORKSPACE (CURRENT) DIRECTORY MUST BE REASONABLE ----------
 # 1. No commas or equals signs (they'd break --mount's option syntax).
 # 2. No home dirs or parents of homedirs.
-# 3. Not the claudebox.sh directory or one of its ancestors.
+# 3. Doesn't contain claudebox's own scripts.
 # 4. Must be owned by current user.
 
 if [[ "$cwd" == *[,=]* ]]; then
@@ -23,11 +41,7 @@ is_same_or_ancestor() {
 }
 
 if is_same_or_ancestor "$cwd" "$script_dir"; then
-    if [[ "$cwd" == "$script_dir" ]]; then
-        echo "Refusing to mount claudebox.sh's own directory as /workspace." >&2
-    else
-        echo "Refusing to mount ‘${cwd}’ as /workspace: it contains claudebox.sh's own directory." >&2
-    fi
+    echo "Refusing to mount ‘${cwd}’ as /workspace: it contains claudebox's own scripts." >&2
     exit 1
 fi
 
@@ -53,7 +67,7 @@ else
     # --no-cache because the Dockerfile pins neither node nor rust, and a cached
     # layer would keep whatever version it first resolved. See
     # BUILD_CACHING_IS_PROBLEMATIC.md.
-    "$script_dir/buildbox.sh" --no-cache
+    "$script_dir/buildbox" --no-cache
 fi
 
 container_options=(
