@@ -80,8 +80,8 @@ ENV TERM xterm-256color
 # CLAUDE.md would read as instructions to an agent working on claudebox
 # itself, and one called .gitconfig gets bind-mounted read-only by Claude
 # Code's sandbox, which makes it uneditable and undeletable.
-COPY --chown=agent:agent image/CLAUDE-TEMPLATE.md .claude/CLAUDE.md
-COPY --chown=agent:agent image/claude-settings-json.json .claude/settings.json
+COPY --chown=agent:agent image/claude-CLAUDE.md .claude/CLAUDE.md
+COPY --chown=agent:agent image/claude-settings.json .claude/settings.json
 # `gh` as the github credential helper. Contains no secrets: `gh auth
 # git-credential` reads from gh's own config, so the container still needs
 # `gh auth login` or a GH_TOKEN passed through `container run --env`.
