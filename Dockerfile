@@ -15,14 +15,20 @@ FROM debian:stable-slim
 # python3 python3-venv pipx         python dev
 # vim-tiny                          backup editor ($EDITOR, git)
 # emacs-nox                         real editor
+# shellcheck                        linting the shell scripts in here
+# buildah                           checking Dockerfile changes
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates bubblewrap curl git less procps python3 socat sudo \
     openssh-client gh \
     vim-tiny emacs-nox ripgrep fd-find jq \
     build-essential pkg-config libssl-dev mold \
     unzip xz-utils zstd patch file tree rsync \
-    python3-venv pipx \
+    python3-venv pipx shellcheck buildah \
     && rm -rf /var/lib/apt/lists/*
+
+# ~120MB for buildah plus ~40MB for shellcheck is a real chunk of this image;
+# consider removing once claudebox's image is more stable. buildah needs no OCI
+# runtime here: only --isolation chroot works in this VM.
 
 # Debian names the fd binary `fdfind`; everyone (including Claude) types `fd`.
 RUN ln -s /usr/bin/fdfind /usr/local/bin/fd
@@ -74,6 +80,7 @@ RUN mkdir -p /home/agent/.cargo && cat > /home/agent/.cargo/config.toml <<'TOML'
 rustflags = ["-C", "link-arg=-fuse-ld=mold"]
 TOML
 ENV TERM xterm-256color
+ENV COLORTERM truecolor
 
 # image/ holds the files copied into the image, one COPY each. Their names
 # there are deliberately not the names they land under: a repo file called
@@ -86,7 +93,10 @@ COPY --chown=agent:agent image/claude-settings.json .claude/settings.json
 # git-credential` reads from gh's own config, so the container still needs
 # `gh auth login` or a GH_TOKEN passed through `container run --env`.
 COPY --chown=agent:agent image/gitconfig .gitconfig
-# Identity comes from the host's git config, passed by bin/buildbox.
+# Referenced by gitconfig's core.excludesFile. Hides the files the sandbox
+# bind-mounts into the workspace, which `git add -A` otherwise chokes on.
+COPY --chown=agent:agent image/gitexclude .gitexclude
+# Identity comes from the host's git config, passed by bin/buildbox.sh.
 ARG GIT_USER_NAME=
 ARG GIT_USER_EMAIL=
 RUN if [ -n "$GIT_USER_NAME" ]; then git config --global user.name "$GIT_USER_NAME"; fi; \
