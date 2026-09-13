@@ -1,5 +1,13 @@
 * tasks
 
+** allow giving github url as argument and use that instead of cwd
+
+given a github url, clone the git repo. where, though?
+- temp directory?
+- clone it into current dir using its name?
+- make a directory specifically for git clones?
+- have a config file for this script that specifies?
+
 ** build a convenient sandbox-exec command-line wrapper
 PR #6 open: bin/devbox + DEVBOX.md, written but never run on macOS.
 name (maybe): devbox?
@@ -41,6 +49,14 @@ problem:
 * future ideas
 
 ** consider converting claudebox to python if it gets more complex
+
+** some sort of preservation of context
+
+Claude Code preserves some state when you re-open claude in the same directory ("project"): memories, for instance. I'd similarly like to persist some state on a per-directory/project basis in Claudebox. In particular:
+
+TODO DESIGN
+
+** consider converting claudebox.sh to python if it gets more complex
 
 ** container lifetime defaults
 
