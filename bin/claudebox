@@ -61,6 +61,17 @@ if [[ ! -O "$cwd" ]]; then
 fi
 # ---------- END WORKSPACE DIR CHECKS ----------
 
+# Per-project Claude state (memories, transcripts, login), keyed by host path so
+# projects don't share it. claudebox-gc cleans up after moved/deleted projects.
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/claudebox/projects/$(basename "$cwd")-$(printf %s "$cwd" | shasum -a 256 | cut -c1-12)"
+if [[ "$state_dir" == *[,=]* ]]; then
+    echo "Refusing to mount ‘${state_dir}’: its path contains a comma or equals sign, which --mount cannot express." >&2
+    exit 1
+fi
+mkdir -p "$state_dir/claude"
+# Its mtime records the last launch.
+printf '%s\n' "$cwd" > "$state_dir/path"
+
 if container image list | grep -q '^claude\b'; then
     echo "Image ‘claude’ already built, reusing."
 else
@@ -74,6 +85,7 @@ container_options=(
     --interactive
     --tty
     --mount "type=bind,source=$cwd,target=/workspace"
+    --mount "type=bind,source=$state_dir/claude,target=/home/agent/.claude"
 )
 
 # Arguments are passed through untouched, --name included: if you supplied one
