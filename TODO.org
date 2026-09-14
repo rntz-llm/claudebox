@@ -70,6 +70,24 @@ problem:
   exfiltration of eg github credentials? seems hard. solve this later; any sandbox is an
   improvement over no sandbox.
 
+* things necessary to make this usable by other people than me
+
+** put less into the image and make it configurable at container start time
+choices that are unique to me and don't belong in an image:
+
+- EDITOR=nano
+- most of CLAUDE.md
+- the non-sandbox bits of claude/settings.json
+
+things that other people will want, though they don't have to be baked into the image:
+
+- the CLAUDE.md advice about being inside an apple container.
+- also the `git push -u` advice.
+
+how can/should we inject this info other than baking into the image?
+
+** eventually: runnable on Linux? use Podman + libkrun eg.
+
 * future ideas
 
 ** consider converting claudebox to python if it gets more complex
