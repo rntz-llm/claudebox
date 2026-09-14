@@ -59,6 +59,9 @@ RUN useradd -m -s /bin/bash agent \
     && chmod 0440 /etc/sudoers.d/agent
 USER agent
 WORKDIR /home/agent
+# Also moves .claude.json in here, so one mount holds all of Claude's state.
+# Set before the installer, which otherwise leaves a stray ~/.claude.json.
+ENV CLAUDE_CONFIG_DIR /home/agent/.claude
 
 RUN curl -fsSL https://claude.ai/install.sh | bash
 ENV PATH "/home/agent/.local/bin:${PATH}"
@@ -86,8 +89,12 @@ ENV COLORTERM truecolor
 # CLAUDE.md would read as instructions to an agent working on claudebox
 # itself, and one called .gitconfig gets bind-mounted read-only by Claude
 # Code's sandbox, which makes it uneditable and undeletable.
-COPY --chown=agent:agent image/claude-CLAUDE.md .claude/CLAUDE.md
-COPY --chown=agent:agent image/claude-settings.json .claude/settings.json
+COPY image/claude-CLAUDE.md /etc/claude-code/CLAUDE.md
+# Defaults the entrypoint merges into $CLAUDE_CONFIG_DIR, which claudebox
+# mounts per project; baking them into ~/.claude would be hidden by that mount.
+COPY image/claude-settings.json /etc/claudebox/settings.json
+COPY image/claude.json /etc/claudebox/.claude.json
+COPY image/entrypoint /usr/local/bin/claudebox-entrypoint
 # `gh` as the github credential helper. Contains no secrets: `gh auth
 # git-credential` reads from gh's own config, so the container still needs
 # `gh auth login` or a GH_TOKEN passed through `container run --env`.
@@ -100,9 +107,8 @@ ARG GIT_USER_NAME=
 ARG GIT_USER_EMAIL=
 RUN if [ -n "$GIT_USER_NAME" ]; then git config --global user.name "$GIT_USER_NAME"; fi; \
     if [ -n "$GIT_USER_EMAIL" ]; then git config --global user.email "$GIT_USER_EMAIL"; fi
-# Avoid prompting for trust of /workspace.
-RUN cat > /home/agent/.claude.json <<EOF
-{ "projects": { "/workspace": { "hasTrustDialogAccepted": true } } }
-EOF
 
 WORKDIR /workspace
+ENTRYPOINT ["/usr/local/bin/claudebox-entrypoint"]
+# Setting ENTRYPOINT clears the CMD inherited from debian.
+CMD ["bash"]
