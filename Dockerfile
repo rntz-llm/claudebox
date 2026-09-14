@@ -13,14 +13,13 @@ FROM debian:stable-slim
 # mold                              fast linker, used for rust
 # unzip xz-utils zstd               archives
 # python3 python3-venv pipx         python dev
-# vim-tiny                          backup editor ($EDITOR, git)
-# emacs-nox                         real editor
+# vim-tiny nano-tiny                editors ($EDITOR, git)
 # shellcheck                        linting the shell scripts in here
 # buildah                           checking Dockerfile changes
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates bubblewrap curl git less procps python3 socat sudo \
     openssh-client gh \
-    vim-tiny emacs-nox ripgrep fd-find jq \
+    vim-tiny nano-tiny ripgrep fd-find jq \
     build-essential pkg-config libssl-dev mold \
     unzip xz-utils zstd patch file tree rsync \
     python3-venv pipx shellcheck buildah \
