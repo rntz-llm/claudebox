@@ -62,8 +62,8 @@ RUN useradd -m -s /bin/bash agent \
 USER agent
 WORKDIR /home/agent
 
-RUN curl -fsSL https://claude.ai/install.sh | bash
 ENV PATH "/home/agent/.local/bin:${PATH}"
+RUN curl -fsSL https://claude.ai/install.sh | bash
 
 # Rust via rustup, not apt: Debian's rustc lags and can't switch toolchains.
 # clippy and rustfmt only -- rust-analyzer (42MB) is an LSP server nothing in
