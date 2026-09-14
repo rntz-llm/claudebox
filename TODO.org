@@ -18,11 +18,16 @@ claudebox du
 
 Might be a good time to convert it from sh to Python for maintainability's sake.
 
-** some sort of preservation of context
+** make it easy to use a narrowly scoped github auth token
 
-Claude Code preserves some state when you re-open claude in the same directory ("project"): memories, for instance. I'd similarly like to persist some state on a per-directory/project basis in Claudebox. In particular:
+would be nice to have a better way to grant tightly scoped github permissions than manually generating PATs.
 
-TODO DESIGN
+- make a GH app?
+- other options?
+
+** make it easy to use a less broadly scoped claude token
+
+Currently, within each container when I start `claude` it prompts me to login, which gives it a pretty broadly scoped auth token with ~30 days to live. Instead, I could use a `claude setup-token` token passed as CLAUDE_CODE_OAUTH_TOKEN. This token lasts about a year and is only good for inference. Is that a good fit? There are other options; see token_leak_analysis.md.
 
 ** allow giving github url as argument and use that instead of cwd
 
@@ -33,7 +38,9 @@ given a github url, clone the git repo. where, though?
 - have a config file for this script that specifies?
 
 ** build a convenient sandbox-exec command-line wrapper
+
 PR #6 open: bin/devbox + DEVBOX.md, written but never run on macOS.
+
 name (maybe): devbox?
 purpose: allow me to interact with a repo on macOS with less trust.
 
@@ -87,26 +94,3 @@ things that other people will want, though they don't have to be baked into the 
 how can/should we inject this info other than baking into the image?
 
 ** eventually: runnable on Linux? use Podman + libkrun eg.
-
-* future ideas
-
-** consider converting claudebox to python if it gets more complex
-
-** container lifetime defaults
-
-now: claudebox runs a long-lived container.
-alternatives:
-
-- `container run --rm` so it's transient.
-
-- `container start` so it doesn't sleep when I leave the session. I often find myself
-  "exec bash"-ing in to the container. If I unexpectedly ctrl-D out of the `container run`
-  session, the container stops and I lose state.
-
-- cache/reuse containers according to the working directory.
-
-** github permissions convenience
-
-would be nice to have a better way to grant tightly scoped github permissions than manually generating PATs.
-- make a GH app?
-- other options?
