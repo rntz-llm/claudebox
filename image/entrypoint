@@ -4,17 +4,22 @@
 # defaults. Existing values win; keys new to the image get added.
 
 set -u
-umask 077
 mkdir -p "$CLAUDE_CONFIG_DIR"
-for f in settings.json .claude.json; do
-    dst="$CLAUDE_CONFIG_DIR/$f"
-    if [ ! -e "$dst" ]; then
-        cp "/etc/claudebox/$f" "$dst"
-    elif jq -s '.[0] * .[1]' "/etc/claudebox/$f" "$dst" > "$dst.tmp"; then
-        mv "$dst.tmp" "$dst"
-    else
-        echo "claudebox-entrypoint: couldn't merge defaults into ‘$dst’; leaving it alone." >&2
+# .claude.json holds account info. The umask keeps new files and temp copies
+# private; writing merges back in place keeps existing files' modes. Subshell so
+# the umask doesn't leak into the exec'd command.
+(
+    umask 077
+    for f in settings.json .claude.json; do
+        dst="$CLAUDE_CONFIG_DIR/$f"
+        if [ ! -e "$dst" ]; then
+            cp "/etc/claudebox/$f" "$dst"
+        elif jq -s '.[0] * .[1]' "/etc/claudebox/$f" "$dst" > "$dst.tmp"; then
+            cat "$dst.tmp" > "$dst"
+        else
+            echo "claudebox-entrypoint: couldn't merge defaults into ‘$dst’; leaving it alone." >&2
+        fi
         rm -f "$dst.tmp"
-    fi
-done
+    done
+)
 exec "$@"
