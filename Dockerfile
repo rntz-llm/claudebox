@@ -95,7 +95,6 @@ COPY image/claude-CLAUDE.md /etc/claude-code/CLAUDE.md
 # Defaults the entrypoint merges into $CLAUDE_CONFIG_DIR, which claudebox
 # mounts per project; baking them into ~/.claude would be hidden by that mount.
 COPY image/claude-settings.json /etc/claudebox/settings.json
-COPY image/claude.json /etc/claudebox/.claude.json
 COPY image/entrypoint /usr/local/bin/claudebox-entrypoint
 # `gh` as the github credential helper. Contains no secrets: `gh auth
 # git-credential` reads from gh's own config, so the container still needs

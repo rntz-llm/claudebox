@@ -1,9 +1,5 @@
 * tasks
 
-** stop injecting "hasTrustDialogAccepted": true, probably
-
-now that state is persisted, I should see this dialog once per project instead of every time I start a claudebox, right? if so, that's good.
-
 ** re-use an existing container if it matches project?
 
 is there any point isolating different claudes on the same project in different claudebox containers if they share their claude config dir? if not, we should probably either go fully-temporary on containers (destroy them at end of session by default) or fully shared & persistent (keep the container around until project destroyed or explicitly pruned, and re-use that container for every `claudebox` command in the same project).
