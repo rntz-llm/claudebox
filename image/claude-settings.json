@@ -3,7 +3,6 @@
   "theme": "auto",
   "model": "opus",
   "effortLevel": "high",
-  "cleanupPeriodDays": 36000,
   "sandbox": {
     "enabled": true,
     "autoAllowBashIfSandboxed": true,

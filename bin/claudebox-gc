@@ -21,7 +21,8 @@ orphans=()
 printf '%6s  %-10s  %s\n' SIZE LAST-USED PROJECT
 for dir in "$state_root"/*/; do
     dir="${dir%/}"
-    [[ -d "$dir" ]] || continue  # empty glob
+    # if there are no subdirs, the * won't expand and we'll hit this case
+    [[ -d "$dir" ]] || continue
     size="$(du -sh "$dir" | cut -f1)"
     if [[ -f "$dir/path" ]]; then
         path="$(cat "$dir/path")"
