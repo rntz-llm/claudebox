@@ -25,6 +25,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-venv pipx shellcheck buildah \
     && rm -rf /var/lib/apt/lists/*
 
+ENV EDITOR nano-tiny
+
 # ~120MB for buildah plus ~40MB for shellcheck is a real chunk of this image;
 # consider removing once claudebox's image is more stable. buildah needs no OCI
 # runtime here: only --isolation chroot works in this VM.
