@@ -1,5 +1,15 @@
 * tasks
 
+** convert claudebox, buildbox into one script with subcommands
+
+claudebox run
+claudebox start ?? expose difference b/w container run/start?
+claudebox build
+claudebox prune
+claudebox du
+
+Might be a good time to convert it from sh to Python for maintainability's sake.
+
 ** some sort of preservation of context
 
 Claude Code preserves some state when you re-open claude in the same directory ("project"): memories, for instance. I'd similarly like to persist some state on a per-directory/project basis in Claudebox. In particular:
