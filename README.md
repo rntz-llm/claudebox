@@ -1,6 +1,5 @@
-Some tools for setting up an Apple container to sandbox Claude in a lightweight VM while
-giving it network access and the ability to install tools it needs. Made for my own use;
-may or may not work for you.
+Use Apple containers to sandbox Claude in a lightweight VM with network access and `sudo`
+to install tools. Made for my own use; may or may not work for you.
 
 Put `bin/` on your `PATH`. Then `claudebox` runs a Debian container with the current
 directory ("project") mounted as `/workspace`. Each project's Claude state (memories,
