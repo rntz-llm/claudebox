@@ -11,9 +11,9 @@ The first `claudebox` run builds the container image; see `Dockerfile`. Use `bui
 
 **Things you might use instead:**
 
-- [https://www.smolmachines.com/](): Same idea - hardware-isolated linux VMs - but it also
+- [smol machines](https://www.smolmachines.com/): Same idea - hardware-isolated linux VMs - but it also
   works on Linux hosts via KVM. Has a cloud service ($10+/mo).
 
-- [https://exe.dev/](): persistent cloud VMs, $20+/mo, includes LLM tokens. Seems to have
+- [exe.dev](https://exe.dev/): persistent cloud VMs, $20+/mo, includes LLM tokens. Seems to have
   thought about LLM integration and security; may have some story about preventing
   exfiltration of auth tokens on prompt injection. Check yourself.
