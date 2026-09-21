@@ -2,5 +2,6 @@ Some tools for setting up an Apple container to sandbox Claude in a lightweight 
 
 `bin/devbox` is the lighter-weight sibling: instead of a VM, it runs a command
 against the current directory under a macOS `sandbox-exec` profile that permits
-writes only inside that directory, denies reads of the rest of your home
-directory, and denies the network unless you ask for it. See DEVBOX.md.
+writes only inside that directory, permits reads only of the system, your
+toolchain and that directory, and denies the network unless you ask for it. See
+DEVBOX.md.

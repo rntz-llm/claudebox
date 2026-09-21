@@ -2,8 +2,8 @@
 
 # Run a command against the current directory under a macOS sandbox, so that
 # repo-supplied code -- git hooks, build scripts, dependencies -- can't write
-# outside the repo, read the rest of your home directory, or talk to the
-# network. See DEVBOX.md for the threat model and the gaps.
+# outside the repo, read anything outside a fixed allowlist, or talk to the
+# network. See DEVBOX.md.
 
 set -euo pipefail
 
@@ -15,16 +15,23 @@ usage() {
 usage: $prog [options] [--] [command [args...]]
 
 Runs command (default: \$SHELL) under a sandbox profile that allows writes only
-to the current directory and to temporary directories, denies reads of
-everything under /Users except an allowlist, and by default denies IP network
-access.
+to the current directory and to temporary directories, allows reads only of the
+system, the toolchain and the current directory, and by default denies IP
+network access.
 
 options:
-  --network=yes|no      allow IP networking (default: no)
-  --allow-read PATH     also permit reads under PATH (repeatable)
-  --allow-write PATH    also permit writes under PATH (repeatable)
-  --print-profile       print the generated sandbox profile and exit
-  -h, --help            this
+  --network=yes|no        allow IP networking (default: no)
+  --allow-read PATH       also permit reads under PATH (repeatable)
+  --allow-write PATH      also permit writes under PATH (repeatable; also
+                          permits reads, since a write-only path is useless)
+  --why                   report the sandbox denials the command caused, after
+                          it exits. This is how you find out what to add.
+  --unsafe-read-anything  cancel the read allowlist entirely. An escape hatch
+                          for when something won't run and you need it to now,
+                          not a mode to live in; writes and network are
+                          unaffected.
+  --print-profile         print the generated sandbox profile and exit
+  -h, --help              this
 
 Option parsing stops at the first non-option argument, so flags meant for the
 command need no --:  $prog cargo test --release
@@ -90,6 +97,8 @@ network=no
 extra_read=()
 extra_write=()
 print_profile=no
+read_anything=no
+why=no
 
 while (( $# )); do
     case "$1" in
@@ -99,6 +108,8 @@ while (( $# )); do
         --allow-read=*) extra_read+=("${1#--allow-read=}"); shift ;;
         --allow-write) extra_write+=("${2-}"); shift $(( $# > 1 ? 2 : 1 )) ;;
         --allow-write=*) extra_write+=("${1#--allow-write=}"); shift ;;
+        --unsafe-read-anything) read_anything=yes; shift ;;
+        --why) why=yes; shift ;;
         --print-profile) print_profile=yes; shift ;;
         -h|--help) usage; exit 0 ;;
         --) shift; break ;;
@@ -148,10 +159,30 @@ esac
 reject_unquotable "$cwd"
 
 # ---------- WHAT THE SANDBOX ALLOWS ----------
+
+# Read access to the system itself. Deliberately broad: these are the most
+# stable paths in macOS, they're world-readable anyway, and narrowing them is
+# how a sandbox turns into something you stop using. Note what is *not* here:
+# /Volumes (a mounted Time Machine disk is a copy of your home directory),
+# /Users (see default_read), and /private/var/folders beyond the scratch
+# directories below.
+system_read=(
+    /bin
+    /sbin
+    /usr
+    /System
+    /Library
+    /Applications
+    /opt
+    /private/etc
+    /private/var/db    # zoneinfo, among other things; the rest is root-owned
+    /private/var/run
+    /dev
+)
+
 # Read access to the toolchain configuration that dev tools need in order to
 # work at all. Everything else under /Users stays unreadable. Cargo's and npm's
 # shared caches are deliberately *not* writable -- see DEVBOX.md.
-
 default_read=(
     "$HOME/.gitconfig"
     "$HOME/.gitexclude"
@@ -160,10 +191,10 @@ default_read=(
     "$HOME/.cargo"
 )
 
-# To run a command you have to be able to read it. Homebrew and the system
-# prefixes are readable anyway; this is for tools installed under $HOME, like
-# ~/.local/bin/claude. The containing directory, not just the binary, because
-# wrappers commonly exec a sibling.
+# To run a command you have to be able to read it. This matters for tools
+# installed under $HOME, like ~/.local/bin/claude, but also for anything
+# outside the system prefixes above. The containing directory, not just the
+# binary, because wrappers commonly exec a sibling.
 cmd_path="$(command -v -- "${cmd[0]}" 2>/dev/null || true)"
 if [[ -n "$cmd_path" && "$cmd_path" == /* ]]; then
     default_read+=("$(dirname "$cmd_path")")
@@ -171,7 +202,8 @@ fi
 
 # Scratch space. $TMPDIR is a per-user directory under /private/var/folders,
 # which also holds per-user caches; /tmp and /var/tmp are world-writable
-# already, so permitting them concedes nothing.
+# already, so permitting them concedes nothing that a process running as you
+# couldn't already do.
 default_write=(
     /private/var/folders
     /private/tmp
@@ -188,21 +220,47 @@ filters() {
         # path that never appears costs nothing.
         resolved="$(resolve "$p" 2>/dev/null)" || continue
         reject_unquotable "$resolved" || exit 1
+        # (subpath "/") would silently cancel the entire allowlist.
+        if [[ "$resolved" == / ]]; then
+            echo "$prog: ‘/’ as an allowlist entry would permit everything; use --unsafe-read-anything if that is what you mean." >&2
+            exit 1
+        fi
         printf '       (subpath "%s")\n' "$resolved"
     done
 }
 
-read_filters="$(filters "$cwd" "${default_read[@]}" ${extra_read[@]+"${extra_read[@]}"})"
-write_filters="$(filters "$cwd" "${default_write[@]}" ${extra_write[@]+"${extra_write[@]}"})"
+# Everything writable is also readable: a write-only directory is not a useful
+# thing to hand a compiler, and under a global read deny you have to say so.
+write_paths=("$cwd" "${default_write[@]}" ${extra_write[@]+"${extra_write[@]}"})
+read_paths=(
+    "${system_read[@]}"
+    "${default_read[@]}"
+    "${write_paths[@]}"
+    ${extra_read[@]+"${extra_read[@]}"}
+)
+
+read_filters="$(filters "${read_paths[@]}")"
+write_filters="$(filters "${write_paths[@]}")"
+
+# An empty filter list renders as a bare `(allow file-read*)`, which cancels
+# the deny above it and allows everything. Both lists contain $cwd, so this
+# can't happen today -- but the failure is silent and total, so assert it.
+if [[ -z "$read_filters" || -z "$write_filters" ]]; then
+    echo "$prog: internal error: empty allowlist would permit everything." >&2
+    exit 1
+fi
 
 # ---------- THE PROFILE ----------
 # SBPL is last-match-wins, so every deny below is followed by the allows that
 # carve holes in it; reordering them silently changes the meaning.
 #
-# This starts from (allow default) and takes away the three things that matter
-# for the threat model. A deny-by-default profile is stronger, but needs a
-# large allowlist of mach services, sysctls and system paths before ordinary
-# dev tools will run, and breaks whenever macOS moves something. See DEVBOX.md.
+# The base is (allow default), and the three things that matter for the threat
+# model are taken away. That is not the same as (deny default), which would
+# additionally close operation classes -- process-exec, mach-lookup, sysctl,
+# iokit, pseudo-tty -- that ordinary dev tooling needs and that would have to
+# be enumerated and re-enumerated against an undocumented, version-specific
+# list. Files and network are denied by default *within* an allow-default base,
+# which is where the security is; see DEVBOX.md.
 
 profile="(version 1)
 (allow default)
@@ -222,13 +280,26 @@ $write_filters)
        (subpath \"/dev/fd\")
        (regex #\"^/dev/ttys[0-9]+\"))
 
-;; ---- reads: home directory closed, with an allowlist ----
-(deny file-read* (subpath \"/Users\"))
-;; Metadata only, so that stat()ing \$HOME and walking up to it still works
-;; while the contents stay unreadable.
-(allow file-read-metadata (subpath \"/Users\"))
+;; ---- reads: nothing, then an allowlist ----
+;; Denied everywhere rather than just under /Users, so that a path nobody
+;; thought to enumerate -- a Time Machine volume under /Volumes, the
+;; /System/Volumes/Data spelling of your home directory, a checkout under /opt
+;; -- is closed by default instead of open by default.
+(deny file-read*)
+;; Metadata only, everywhere, so that stat() and path-walking work while
+;; contents stay unreadable.
+(allow file-read-metadata)
+;; The root directory itself, so that readdir(\"/\") works.
+(allow file-read* (literal \"/\"))
 (allow file-read*
 $read_filters)"
+
+if [[ "$read_anything" == yes ]]; then
+    profile="$profile
+
+;; ---- --unsafe-read-anything: the allowlist above is cancelled ----
+(allow file-read*)"
+fi
 
 if [[ "$network" == no ]]; then
     profile="$profile
@@ -255,5 +326,28 @@ export DEVBOX=1
 if [[ -t 2 ]]; then
     echo "$prog: ‘${cwd}’ writable, network ${network}, reads outside the allowlist denied." >&2
 fi
+if [[ "$read_anything" == yes ]]; then
+    echo "$prog: --unsafe-read-anything: every readable file on the machine is readable in here." >&2
+fi
 
-exec /usr/bin/sandbox-exec -p "$profile" "${cmd[@]}"
+if [[ "$why" != yes ]]; then
+    exec /usr/bin/sandbox-exec -p "$profile" "${cmd[@]}"
+fi
+
+# --why: run rather than exec, so that the denials can be collected afterwards.
+# `log show` after the fact rather than `log stream` alongside, because stream
+# takes a moment to attach and would miss the denials at startup, which are the
+# ones you most want to see.
+started="$(date '+%Y-%m-%d %H:%M:%S')"
+status=0
+/usr/bin/sandbox-exec -p "$profile" "${cmd[@]}" || status=$?
+echo "$prog: sandbox denials since ${started}:" >&2
+# A denial is logged as e.g.
+#   Sandbox: bash(123) deny(1) file-read-data /Users/me/.ssh/id_ed25519
+# The predicate is the part most likely to need adjusting across macOS
+# releases; `log show --last 2m --predicate 'eventMessage CONTAINS "deny("'`
+# by hand is the fallback.
+/usr/bin/log show --style compact --start "$started" \
+    --predicate 'eventMessage CONTAINS "deny("' 2>/dev/null \
+    | grep -v '^Timestamp' >&2 || echo "$prog: none logged." >&2
+exit "$status"
