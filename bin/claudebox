@@ -77,6 +77,80 @@ container_options=(
     --mount "type=bind,source=$state_dir/claude,target=/home/agent/.claude"
 )
 
+# ---------- CLAUDE AUTH TOKEN ----------
+# An inference-only token (see bin/claudebox-token) beats a /login credential
+# here: it can only run models, so reading it buys a prompt injection no
+# connectors, cloud sessions or Remote Control. It's mounted read-only, denied
+# to sandboxed commands by image/claude-settings.json, and fed to claude on a
+# pipe by the image's bin/claude.
+secret_dir=
+trap '[[ -n "$secret_dir" ]] && rm -rf "$secret_dir"' EXIT
+
+token="$("$script_dir/claudebox-token" get 2>/dev/null)" || token=
+if [[ -z "$token" && -t 0 ]]; then
+    echo "No Claude token stored; ‘claude’ will ask you to /login in the container."
+    read -r -p "Create one now with claudebox-token? [y/N] " reply
+    if [[ "$reply" == [yY]* ]]; then
+        "$script_dir/claudebox-token" set || true
+        token="$("$script_dir/claudebox-token" get 2>/dev/null)" || token=
+    fi
+fi
+
+if [[ -n "$token" ]]; then
+    secret_dir="$(mktemp -d)"
+    if [[ "$secret_dir" == *[,=]* ]]; then
+        echo "Refusing to mount ‘${secret_dir}’: its path contains a comma or equals sign, which --mount cannot express." >&2
+        exit 1
+    fi
+    (umask 077; printf '%s\n' "$token" > "$secret_dir/oauth-token")
+    container_options+=(--mount "type=bind,source=$secret_dir,target=/run/claudebox-secrets,readonly")
+fi
+token=
+
+# Same keys `/logout` drops, leaving mcpOAuth (per-server MCP logins) alone. No
+# backup: a copy would preserve the very token being removed. The temp file is
+# renamed over the original, so a failure can't lose the other credentials.
+remove_login_credential() {
+    local f="$1" tmp k
+    tmp="$(mktemp "$(dirname "$f")/.credentials.XXXXXX")" || return 1
+    chmod 600 "$tmp"
+    if command -v jq >/dev/null; then
+        jq 'del(.claudeAiOauth, .organizationUuid, .trustedDeviceToken, .enterpriseGateway, .designOauth)' \
+            "$f" > "$tmp" || { rm -f "$tmp"; return 1; }
+    elif command -v plutil >/dev/null; then
+        # macOS has no jq, but plutil reads and writes JSON.
+        cat "$f" > "$tmp"
+        plutil -convert json "$tmp" >/dev/null 2>&1 || { rm -f "$tmp"; return 1; }
+        for k in claudeAiOauth organizationUuid trustedDeviceToken enterpriseGateway designOauth; do
+            plutil -remove "$k" "$tmp" >/dev/null 2>&1 || true  # absent key: fine
+        done
+        plutil -lint "$tmp" >/dev/null 2>&1 || { rm -f "$tmp"; return 1; }
+    else
+        rm -f "$tmp"
+        return 2
+    fi
+    mv "$tmp" "$f"
+}
+
+# claude prefers the token, but a 401 sends it back to a stored login, so a
+# leftover one quietly undoes the point of the token.
+creds="$state_dir/claude/.credentials.json"
+if [[ -n "$secret_dir" && -f "$creds" && -t 0 ]] && LC_ALL=C grep -q claudeAiOauth "$creds"; then
+    echo "This project still holds a /login credential (full-scope, refreshable):"
+    echo "  $creds"
+    read -r -p "Remove it? MCP server logins are kept. [y/N] " reply
+    if [[ "$reply" == [yY]* ]]; then
+        if remove_login_credential "$creds"; then
+            echo "Removed. This does NOT revoke it: sign out of all sessions at claude.ai > Settings."
+        elif (( $? == 2 )); then
+            echo "Neither jq nor plutil found; remove it yourself." >&2
+        else
+            echo "Couldn't rewrite ‘${creds}’; left it alone." >&2
+        fi
+    fi
+fi
+# ---------- END CLAUDE AUTH TOKEN ----------
+
 # Arguments are passed through untouched, --name included: if you supplied one
 # that's the name, and a name that's already taken is `container run`'s
 # complaint to make, not ours. Only when there's no --name do we pick one from
