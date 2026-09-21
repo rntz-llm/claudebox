@@ -25,3 +25,5 @@ To check that a Dockerfile change builds, use buildah. It works only as root and
     sudo buildah build --storage-driver vfs --isolation chroot -t check .
 
 That is not Apple's `container build`, so it checks Dockerfile semantics, not that builder's caching behaviour.
+
+The image ships no apt lists, so run `sudo apt-get update` before installing anything; without it apt reports packages as uninstallable rather than missing.

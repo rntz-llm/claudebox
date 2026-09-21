@@ -15,21 +15,21 @@ FROM debian:stable-slim
 # python3 python3-venv pipx         python dev
 # vim-tiny nano-tiny                editors ($EDITOR, git)
 # shellcheck                        linting the shell scripts in here
-# buildah                           checking Dockerfile changes
+# buildah netavark                  building images to check Dockerfile changes
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates bubblewrap curl git less procps python3 socat sudo \
     openssh-client gh \
     vim-tiny nano-tiny ripgrep fd-find jq \
     build-essential pkg-config libssl-dev mold \
     unzip xz-utils zstd patch file tree rsync \
-    python3-venv pipx shellcheck buildah \
+    python3-venv pipx shellcheck buildah netavark \
     && rm -rf /var/lib/apt/lists/*
 
 ENV EDITOR nano-tiny
 
-# ~120MB for buildah plus ~40MB for shellcheck is a real chunk of this image;
-# consider removing once claudebox's image is more stable. buildah needs no OCI
-# runtime here: only --isolation chroot works in this VM.
+# ~120MB for buildah/netavark plus ~40MB for shellcheck is a real chunk of this image;
+# consider removing once claudebox's image is more stable. buildah needs no OCI runtime
+# here: only --isolation chroot works in this VM. It does need netavark, however.
 
 # Debian names the fd binary `fdfind`; everyone (including Claude) types `fd`.
 RUN ln -s /usr/bin/fdfind /usr/local/bin/fd
