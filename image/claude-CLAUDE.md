@@ -10,7 +10,7 @@ Unless asked to be agentic or persistent, you may ask for help if a configuratio
 
 You're in a Debian image inside an Apple container. Your bash tool is independently sandboxed by the Claude Code harness. Do not confuse these; call them the container and the sandbox respectively.
 
-You have sudo access for installing software. It requires dangerouslyDisableSandbox.
+You have sudo access for installing software. It requires dangerouslyDisableSandbox. The image ships no apt lists, so run `sudo apt-get update` before installing anything; without it apt reports packages as uninstallable rather than missing.
 
 If files have changed underneath you, two explanations among possible others: the user may have edited /workspace, or the container may have been restarted. Only ~/.claude and /workspace are persistent across container restarts. Container restarts should be rare; don't engineer around them without consent from user.
 
@@ -25,5 +25,3 @@ To check that a Dockerfile change builds, use buildah. It works only as root and
     sudo buildah build --storage-driver vfs --isolation chroot -t check .
 
 That is not Apple's `container build`, so it checks Dockerfile semantics, not that builder's caching behaviour.
-
-The image ships no apt lists, so run `sudo apt-get update` before installing anything; without it apt reports packages as uninstallable rather than missing.
