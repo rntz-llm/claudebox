@@ -15,8 +15,7 @@ FROM debian:stable-slim
 # python3 python3-venv pipx         python dev
 # vim-tiny nano-tiny                editors ($EDITOR, git)
 # shellcheck                        linting the shell scripts in here
-# buildah                           checking Dockerfile changes
-# netavark                          buildah needs it to create a build container
+# buildah netavark                  building images to check Dockerfile changes
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates bubblewrap curl git less procps python3 socat sudo \
     openssh-client gh \
@@ -28,13 +27,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 ENV EDITOR nano-tiny
 
-# ~120MB for buildah plus ~40MB for shellcheck is a real chunk of this image;
-# consider removing once claudebox's image is more stable. buildah needs no OCI
-# runtime here: only --isolation chroot works in this VM. netavark is separate
-# because it's only a Recommends of buildah's containers-common: the dependency
-# on container-network-stack is satisfied by containernetworking-plugins, whose
-# CNI backend this buildah is built without. Without netavark it fails before
-# the first step.
+# ~120MB for buildah/netavark plus ~40MB for shellcheck is a real chunk of this image;
+# consider removing once claudebox's image is more stable. buildah needs no OCI runtime
+# here: only --isolation chroot works in this VM. It does need netavark, however.
 
 # Debian names the fd binary `fdfind`; everyone (including Claude) types `fd`.
 RUN ln -s /usr/bin/fdfind /usr/local/bin/fd
