@@ -18,6 +18,12 @@ claudebox du
 
 Might be a good time to convert it from sh to Python for maintainability's sake.
 
+** GH token exfiltration from claudebox is too easy
+
+passing it in environment means it's readable even inside claude sandbox.
+minimum: put it somewhere else so it requires manual or auto approval.
+is it possible to do better without lots of work?
+
 ** make it easy to use a narrowly scoped github auth token
 
 would be nice to have a better way to grant tightly scoped github permissions than manually generating PATs.
@@ -82,7 +88,7 @@ problem:
 ** put less into the image and make it configurable at container start time
 choices that are unique to me and don't belong in an image:
 
-- EDITOR=nano
+- EDITOR=nano-tiny
 - most of CLAUDE.md
 - the non-sandbox bits of claude/settings.json
 
