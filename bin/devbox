@@ -12,6 +12,7 @@ directory you have decided not to trust -- cannot supply the interpreter that
 decides what the sandbox means.
 """
 
+import errno
 import os
 import subprocess
 import sys
@@ -66,76 +67,36 @@ class ResolveError(Exception):
 
 
 # ---------- PATHS ----------
-def _split(p):
-    """POSIX dirname/basename, which differ from os.path for trailing slashes
-    and for bare names."""
-    stripped = p.rstrip("/")
-    if not stripped:
-        return "/", "/"
-    head, _, base = stripped.rpartition("/")
-    if not head:
-        head = "/" if p.startswith("/") else "."
-    return head, base
-
-
-def longest_existing(p):
-    """The longest existing ancestor of p, resolved, with the missing tail
-    re-attached. A deny does not need its target to exist, and emitting it
-    anyway closes the window in which something creates the path after the
-    profile has been built."""
-    tail = []
-    head = p
-    while not os.path.isdir(head):
-        nxt, base = _split(head)
-        if nxt == head:
-            return None
-        tail.append(base)
-        head = nxt
-    head = os.path.realpath(head)
-    for base in reversed(tail):
-        head = "/" + base if head == "/" else head + "/" + base
-    return head
-
-
 def resolve(p, missing_ok=False):
-    """Absolute physical path. Does not error if the file does not exist yet,
-    but resolves its directory path fully.
+    """Absolute physical path, with every symlink resolved, because Seatbelt
+    matches the path an operation resolves to rather than the one it was
+    handed.
 
-    It's important that we fully resolve things because sandbox-exec/macOS
-    Seatbelt matches the resolved physical path, so otherwise e.g. denying reads
-    to a symlinked file wouldn't work properly.
+    realpath() does the resolving, including the case that matters for rules
+    naming a cache a tool has not created yet: it resolves as far as the path
+    exists and re-attaches the rest. What it will not tell us is *why* it
+    could not finish, so os.stat() is asked first -- ELOOP for a cycle,
+    ENOENT/ENOTDIR for something simply absent. The distinction is the whole
+    point: absent is ordinary, broken is not.
     """
-    original = p
-    # A literal tilde, from a quoted argument the shell didn't expand.
-    if p == "~":
-        p = home()
-    elif p.startswith("~/"):
-        p = os.path.join(home(), p[2:])
-
-    links = 0
-    while os.path.islink(p):
-        links += 1
-        if links > 40:
-            raise ResolveError(
-                "‘%s’ is more than 40 symlinks deep; a loop?" % original)
-        try:
-            target = os.readlink(p)
-        except OSError as e:
-            raise ResolveError("cannot read the symlink %s: %s" % (p, e))
-        p = target if target.startswith("/") else os.path.join(_split(p)[0], target)
-
-    if os.path.isdir(p):
+    p = os.path.expanduser(p)
+    try:
+        os.stat(p)
         return os.path.realpath(p)
+    except OSError as e:
+        if e.errno not in (errno.ENOENT, errno.ENOTDIR):
+            # ELOOP, or a parent we aren't allowed to traverse. Either way the
+            # path is not what it claims to be, and guessing would be worse.
+            raise ResolveError("%s: %s" % (p, e.strerror))
 
-    head, base = _split(p)
-    if os.path.isdir(head):
-        head = os.path.realpath(head)
-        return "/" + base if head == "/" else head + "/" + base
-    if missing_ok:
-        r = longest_existing(p)
-        if r is not None:
-            return r
-    raise ResolveError("no such directory: %s" % head, missing=True)
+    # Not there. A deny doesn't care -- it is cheaper to forbid a path that
+    # never appears than to leave a window open if it does. An allow does
+    # care, at least about the parent, so that a typo surfaces here instead of
+    # as a mysterious denial later.
+    head = os.path.dirname(p.rstrip("/")) or "."
+    if not missing_ok and not os.path.isdir(head):
+        raise ResolveError("no such directory: %s" % head, missing=True)
+    return os.path.realpath(p)
 
 
 def reject_unquotable(p):
