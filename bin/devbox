@@ -80,11 +80,11 @@ def resolve(p: str) -> str:
     """Absolute physical path, with every symlink resolved, because Seatbelt
     matches the path an operation resolves to rather than the one it was handed.
 
-    Raises OSError if the path is *broken* -- a symlink loop, a parent we
-    can't traverse. Merely absent is not an error: a rule for a path that
-    never appears simply never matches, and one for a path created later
-    starts working when it is. Callers must not swallow the error, because
-    silently dropping a rule is how a deny disappears."""
+    Raises OSError if the path is *broken* -- a symlink loop, a parent we can't
+    traverse. This is fatal: silently dropping rules is a security problem. By
+    contrast, absence is not an error: rules apply even to files that don't
+    exist or don't yet exist.
+    """
     # realpath() resolves as far as the path exists and re-attaches the rest,
     # but won't say *why* it couldn't finish, so os.stat() is asked first and
     # its errno does the classifying.
@@ -344,17 +344,23 @@ def refuse_denied_cwd(cwd: str) -> None:
     happens to sit under, so refuse instead of quietly undoing one:
     `cd ~/.ssh && devbox` is a mistake, not a request. Only the defaults are
     policed; denying your own repo from the config file or the command line is
-    a thing you are allowed to mean."""
+    a thing you are allowed to mean.
+
+    Last match wins, exactly as SBPL resolves it. Scanning for any matching
+    deny is wrong: every path under $HOME matches the `/Users` deny that the
+    `$HOME` allow immediately overrides."""
+    verdict = None
     for action, path in default_read_rules():
-        if action != "deny":
-            continue
         try:
             d = vet(path)
         except OSError:
             continue  # stanzas() will report it properly in a moment
         if cwd == d or cwd.startswith(d + "/"):
-            die(f"refusing to run in ‘{cwd}’: it is inside ‘{d}’, which is on "
-                "the read denylist.")
+            verdict = (action, d)
+    if verdict and verdict[0] == "deny":
+        die(f"refusing to run in ‘{cwd}’: it is inside ‘{verdict[1]}’, which "
+            "is on the read denylist.")
+
 
 PROFILE = '''(version 1)
 (allow default)
