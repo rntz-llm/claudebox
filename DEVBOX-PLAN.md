@@ -212,6 +212,41 @@ This is the same rule the symlink result showed, and it also retroactively
 justifies the script writing `/private/tmp` and `/private/var/tmp` rather than
 `/tmp` and `/var/tmp`.
 
+### rename(2): tested, and it is why write implies read
+
+`mv` out of a write-allowed, read-denied directory succeeds and the bytes
+land somewhere readable. Verified on macOS with a hand-built profile:
+
+```sh
+(allow file-write* (subpath "$HOME/t/ro"))
+(deny  file-read*  (subpath "$HOME/t/ro"))
+# cat ~/t/ro/creds        -> denied
+# mv ~/t/ro/creds ./stolen && cat ./stolen   -> SECRET
+```
+
+So rename needs write at both ends and read at neither, unlike `link`, which
+is checked for both on the source. Writable-but-unreadable therefore never
+preserved secrecy; it only looked like it did. That is the justification for
+`allow-write` implying `allow-read`, and for the contrapositive
+`deny-read` implying `deny-write`: the profile should not be able to state
+something that isn't true.
+
+Consequence to keep in mind: anything you make writable is effectively
+readable, whether or not a read rule says so.
+
+Still to check: `deny-write` on `$cwd/.git/config` has to withstand the same
+trick. `mv .git/config /tmp/x` needs write on the source *path*, which is
+denied, while `.git/` itself is writable -- but that is an inference from the
+test above, not a measurement.
+
+### subpath: tested, matches a plain file
+
+`(subpath "/path/to/file")` covers the file itself, so the file-shaped
+denylist entries -- `~/.netrc`, `~/.npmrc`, `~/.pypirc`, `~/.authinfo`,
+`~/.gem/credentials`, `~/.cargo/credentials.toml` -- work as written. No need
+for `literal`. Verified with `devbox --deny-read ~/t/canary sh -c 'cat
+~/t/canary'`, which is denied.
+
 ### Hardlinks: tested, closed, no action needed
 
 Link creation checks **both read and write on the source**, so it can never

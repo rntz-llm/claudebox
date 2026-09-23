@@ -190,10 +190,12 @@ If you reach for the same flag twice, put it in `~/.config/devbox/allow-write`.
 
 - **Partly tested.** It runs: the profile compiles, `sandbox-exec` executes the
   command, and the file rules behave as described - reads and writes outside
-  the policy are denied, and link creation is checked against the source. Not
-  yet exercised: the network stanza, where SBPL's spelling for unix-socket
-  filters has varied across releases; `--why`; and any real toolchain end to
-  end. The profile is generated rather than hand-maintained, and
+  the policy are denied, link creation is checked against the source for both
+  read and write, `subpath` covers a plain file as well as a directory, and
+  `rename` needs write at both ends and read at neither, which is what
+  `allow-write` implying `allow-read` exists to be honest about. Not yet
+  exercised: the network stanza, where SBPL's spelling for unix-socket filters
+  has varied across releases; `--why`; and any real toolchain end to end. The profile is generated rather than hand-maintained, and
   `--print-profile` shows exactly what `sandbox-exec` will be handed; if it
   fails to compile, `sandbox-exec` refuses to run the command at all - it fails
   closed.
