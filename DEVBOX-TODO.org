@@ -1,0 +1,13 @@
+* HARDENING FOLLOW UPS
+
+Think about preventing some Mach services so `open -a`, launchctl submit, etc can't be used.
+
+Think about --clean-env to avoid throwing GH_TOKEN etc into devbox.
+
+Think about unix socket narrowing to prevent ssh-agent access and docker access.
+
+* TODOS
+
+would be nice if my prompt INDICATED I was in a devbox - like being in a venv.
+
+figure out the .zhist locking issue. can this be fixed easily? or at least prettified?
