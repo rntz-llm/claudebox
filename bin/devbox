@@ -77,29 +77,24 @@ command need no --:  {prog} cargo test --release
 # -------------------- PATHS --------------------
 
 class ResolveError(Exception):
-    """A path that can't be turned into an absolute physical path.
+    """A path that is broken rather than merely absent: a symlink loop, or a
+    parent we can't traverse.
 
-    `missing` separates "you don't have this installed", which a default list
-    may harmlessly name, from "this is broken" -- a symlink loop, an unreadable
-    parent. The second is never ignorable: silently dropping a rule is how a
-    deny disappears, and the working directory is writable by the code we are
-    trying to contain, so a path a rule names is a path that code can tamper
-    with."""
+    Absence is not an error. A rule may name a cache a tool hasn't created
+    yet, or a tool you don't have; either way it costs nothing to emit and
+    starts working if the path appears. Broken is always fatal, because
+    silently dropping a rule is how a deny disappears, and the working
+    directory is writable by the code we are containing."""
 
-    def __init__(self, msg: str, missing: bool = False):
-        super().__init__(msg)
-        self.missing = missing
-
-def resolve(p: str, missing_ok: bool = False) -> str:
+def resolve(p: str) -> str:
     """Absolute physical path, with every symlink resolved, because Seatbelt
     matches the path an operation resolves to rather than the one it was handed.
-
-    realpath() does the resolving, including the case that matters for rules
-    naming a cache a tool has not created yet: it resolves as far as the path
-    exists and re-attaches the rest. What it will not tell us is *why* it could
-    not finish, so os.stat() is asked first -- ELOOP for a cycle, ENOENT or
-    ENOTDIR for something simply absent. That distinction is the whole point:
-    absent is ordinary, broken is not."""
+    """
+    # realpath() resolves as far as the path exists and re-attaches the rest.
+    # What it will not tell us is *why* it could not finish, so os.stat() is
+    # asked first -- ELOOP for a cycle, ENOENT or ENOTDIR for something simply
+    # absent. Absent is ordinary and fine: a rule for a path that never appears
+    # simply never matches. Anything else is broken, and fatal.
     p = os.path.expanduser(p)
     try:
         os.stat(p)
@@ -109,18 +104,11 @@ def resolve(p: str, missing_ok: bool = False) -> str:
             # ELOOP, or a parent we aren't allowed to traverse. Either way the
             # path is not what it claims to be, and guessing would be worse.
             raise ResolveError(f"{p}: {e.strerror}")
-    # Not there. A deny doesn't care -- forbidding a path that never appears is
-    # cheaper than leaving a window open if it does. An allow does care, at
-    # least about the parent, so that a typo surfaces here rather than later as
-    # a mysterious denial.
-    head = os.path.dirname(p.rstrip("/")) or "."
-    if not missing_ok and not os.path.isdir(head):
-        raise ResolveError(f"no such directory: {head}", missing=True)
     return os.path.realpath(p)
 
-def vet(path: str, missing_ok: bool = False) -> str:
+def vet(path: str) -> str:
     """Resolve a rule's path and check it can be written into the profile."""
-    p = resolve(path, missing_ok=missing_ok)
+    p = resolve(path)
     # Paths are interpolated into a double-quoted SBPL string, and SBPL cannot
     # express a literal quote or backslash inside one.
     if '"' in p or "\\" in p or "\n" in p:
@@ -202,6 +190,13 @@ def check_flag_rules(rules: list[Rule], kind: str) -> None:
             resolve(p)
         except ResolveError as e:
             die(f"{e} (from {flag})")
+        # A path you just typed should at least have a parent that exists. The
+        # defaults and the config files are exempt -- they may name tools you
+        # don't have -- but here a typo would allow or deny the wrong thing,
+        # silently, and one stat catches it.
+        head = os.path.dirname(os.path.expanduser(p).rstrip("/")) or "."
+        if not os.path.isdir(head):
+            die(f"no such directory: {head} (from {flag})")
 
 def read_config(name: str, action: str) -> list[Rule]:
     """One path per line, in file order; blank lines and lines starting with
@@ -341,12 +336,10 @@ def stanzas(rules: list[Rule], op: str) -> str:
     resolved = []
     for action, path in rules:
         try:
-            # A deny is emitted whether or not its target exists; an allow for
-            # a path that never appears costs nothing, so it is dropped.
-            resolved.append((action, vet(path, missing_ok=(action == "deny"))))
+            # Every rule either renders or is fatal. A path that doesn't
+            # exist yet still gets a rule, so nothing is silently dropped.
+            resolved.append((action, vet(path)))
         except ResolveError as e:
-            if e.missing and action == "allow":
-                continue
             die(f"{e} ({action} rule)")
     out = []
     for action, group in itertools.groupby(resolved, key=lambda r: r[0]):
@@ -364,9 +357,9 @@ def refuse_denied_cwd(cwd: str) -> None:
         if action != "deny":
             continue
         try:
-            d = vet(path, missing_ok=True)
+            d = vet(path)
         except ResolveError:
-            continue
+            continue  # stanzas() will report it properly in a moment
         if cwd == d or cwd.startswith(d + "/"):
             die(f"refusing to run in ‘{cwd}’: it is inside ‘{d}’, which is on "
                 "the read denylist.")
