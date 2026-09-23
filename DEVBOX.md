@@ -13,48 +13,58 @@ cd ~/src/someones-repo
 devbox                            # a shell, sandboxed
 devbox cargo test                 # one command
 devbox --network=yes npm ci       # when a step genuinely needs the network
-devbox --allow-read ~/.zshrc      # widen the read allowlist
-devbox --why cargo test           # ...and find out what to widen it with
+devbox --allow-write ~/.npm       # widen the write allowlist for one run
+devbox --why cargo build          # ...and find out what to widen it with
 devbox --print-profile            # see exactly what the profile says
 ```
 
 ## What it allows
 
-- **Writes** - the current directory, `/private/var/folders` (which holds
-  `$TMPDIR` and the per-user caches), `/tmp`, `/var/tmp`, and the usual
-  writable character devices. Nothing else: not your dotfiles, not
-  `~/.ssh/config`, not a launch agent, not another repo.
+- **Writes** - the current directory, `$TMPDIR`, `/tmp`, `/var/tmp`, and the
+  usual writable character devices. Nothing else: not your dotfiles, not
+  `~/.ssh/config`, not a launch agent, not another repo. Not `.git/config` or
+  `.git/hooks` either, even though they are inside the writable directory -
+  see below.
 
-- **Reads** - the system (`/usr`, `/bin`, `/sbin`, `/System`, `/Library`,
-  `/Applications`, `/opt`, `/private/etc`, `/dev`, and the plumbing under
-  `/private/var/db` and `/private/var/run`), your toolchain config
-  (`~/.gitconfig`, `~/.gitexclude`, `~/.config/git`, `~/.rustup`, `~/.cargo`,
-  and the directory the command you asked for lives in), the scratch
-  directories above, and the current directory. Everything else is denied,
-  including what nobody would think to enumerate: `~/.aws`, `~/.ssh`,
-  `~/.netrc`, `~/.config/gh/hosts.yml`, a Time Machine volume under `/Volumes`,
-  a checkout under `/opt`. `stat` is permitted everywhere, so path-walking
-  still works.
+- **Reads** - everything, *except* your credentials and your private data:
+  `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.kube`, `~/.docker`, `~/.netrc`,
+  `~/.npmrc`, `~/.config/gh`, `~/.claude` and friends; all of `~/Library`,
+  which holds the keychain, your cookies and your mail, with the developer
+  subtrees (`Developer`, `Caches`, `Fonts`, `Android`, `Python`, `pnpm`) given
+  back; other users' home directories; `/Volumes`, because a mounted Time
+  Machine disk is a copy of your home directory. `stat` is permitted
+  everywhere, so path-walking still works.
 
 - **IP networking** - none, unless you pass `--network=yes`. Unix-domain
   sockets stay reachable either way; denying them breaks the DNS resolver,
   syslog and the pasteboard for no gain once IP is gone.
 
-Files and the network are the fail-closed part. Everything else - running
-programs, mach services, sysctls - is permitted, because the profile is
-`(allow default)` with `file-read*`, `file-write*` and `network*` denied inside
-it.
+The two lists are shaped differently on purpose. "Files my dev environment
+reads" is long, personal and open-ended, and enumerating it produces a sandbox
+that breaks constantly and therefore stops being used; "files that are secrets"
+is short and nearly universal. Writes are the reverse: almost nothing
+legitimately writes outside the repo and its caches, so denying by default
+costs little and catches a lot.
 
-That is deliberate. Starting from `(deny default)` instead means naming every
-operation class dev tooling needs - `process-exec`, `mach*`, `sysctl-read`,
-`file-map-executable`, `pseudo-tty` - from an undocumented list that changes
-between releases. (`file-map-executable` arrived in macOS 12 and broke
-deny-default profiles everywhere; miss `pseudo-tty` and `tmux` stops working.)
-What it would close here on top of the above is `iokit-open`, `nvram*` and the
-camera and microphone, which TCC governs anyway. Not worth a sandbox that
-breaks every autumn and stops getting used.
+The price is that a secret somewhere nobody listed stays readable. With the
+network off by default that is staged exfiltration rather than exfiltration,
+which is the trade being made.
+
+Everything that is not a file or a socket - running programs, mach services,
+sysctls - is permitted, because the profile is `(allow default)` with
+`file-write*` and `network*` denied inside it and `file-read*` carved into.
+Starting from `(deny default)` instead means naming every operation class dev
+tooling needs - `process-exec`, `mach*`, `sysctl-read`, `file-map-executable`,
+`pseudo-tty` - from an undocumented list that changes between releases.
+(`file-map-executable` arrived in macOS 12 and broke deny-default profiles
+everywhere; miss `pseudo-tty` and `tmux` stops working.) What it would close
+here is `iokit-open`, `nvram*` and the camera and microphone, which TCC governs
+anyway. Not worth a sandbox that breaks every autumn.
 
 ## What it doesn't stop
+
+- **Reading a secret nobody thought to list.** The read policy is a denylist,
+  so a credential in a novel location is readable. Add it to `deny-read`.
 
 - **Starting a process outside the sandbox.** Children inherit the profile, but
   `open -a`, `launchctl submit` and Apple Events ask a system service to do the
@@ -75,17 +85,16 @@ breaks every autumn and stops getting used.
 
 - **Your environment.** It passes through as-is, so whatever your shell
   exported - `GITHUB_TOKEN`, `ANTHROPIC_API_KEY`, `AWS_SECRET_ACCESS_KEY` - is
-  there inside. Not reading your rc files doesn't help with that; launch from a
-  clean shell if it matters.
+  there inside. Launch from a clean shell if it matters.
 
-- **Damage inside the working directory.** The repo is writable by design, and
-  your unsandboxed tools read it afterwards: `.git/config` alone can run
-  commands via `core.fsmonitor`, `core.sshCommand` and `diff.*.textconv`, and
-  then there are `.envrc`, `Makefile`, `package.json` scripts.
-  `git -c core.hooksPath=/dev/null` covers hooks and nothing else.
+- **Damage inside the working directory.** The repo is writable by design. The
+  two files your unsandboxed git would execute from - `.git/config`, via
+  `core.fsmonitor`, `core.sshCommand` and `diff.*.textconv`, and `.git/hooks` -
+  are denied, but `.envrc`, `Makefile` and `package.json` scripts are not, and
+  your own tools run those later.
 
-- **Links are not an escape, but they can surprise you.** Rules match the
-  path a file resolves to, so a symlink pointing at `~/.ssh` gains nothing, and
+- **Links are not an escape, but they can surprise you.** Rules match the path
+  a file resolves to, so a symlink pointing at `~/.ssh` gains nothing, and
   creating a hardlink is checked against the source for both read and write.
   The flip side: a symlinked subdirectory of the repo that really lives
   elsewhere isn't writable.
@@ -96,39 +105,43 @@ breaks every autumn and stops getting used.
 
 - **Kernel or sandbox escapes.** See Caveats.
 
-## Network and credentials
+## Configuring it
 
-`git push` and `git pull` need the network, and once a process has the network,
-"can it exfiltrate my GitHub credentials?" becomes hard rather than impossible.
-The read allowlist keeps `~/.ssh` and `~/.config/gh/hosts.yml` out of reach;
-ssh-agent and the keychain are not covered, per above.
+Two files, one path per line. Blank lines and lines starting with `#` are
+ignored; `~` is expanded; a leading `!` reverses the file's sense, so a
+`deny-read` entry can re-allow and an `allow-write` entry can subtract.
 
-The practical stance: builds, tests, hooks and installs with the network off,
-`push` and `pull` from a normal shell outside devbox. That leaves `pre-push` -
-repo-supplied code - running unsandboxed, so
-`git -c core.hooksPath=/dev/null push` if you care.
+```
+~/.config/devbox/deny-read      # paths to hide, in addition to the defaults
+~/.config/devbox/allow-write    # paths to make writable, beyond the repo
+```
 
-Unsolved, deliberately. Any sandbox is an improvement over no sandbox.
+```sh
+# ~/.config/devbox/deny-read
+~/work/customer-data
+!~/.claude                      # I want this one readable after all
+
+# ~/.config/devbox/allow-write
+~/.cargo/registry
+!~/src/scratch/.git/config      # let git write config in this one repo
+```
+
+Entries are applied after the built-in defaults, so yours always win.
+`--allow-read PATH` and `--allow-write PATH` do the same thing for a single
+run, and are repeatable. There is deliberately no per-project config file: the
+repo is the thing being contained, so it does not get to name its own
+exceptions.
 
 ## When something won't run
 
-The read allowlist is certainly missing something that some toolchain wants.
-`--why` runs the command and then prints the denials it caused, which names the
-path to add:
+Almost always a write. `--why` runs the command and then prints the denials it
+caused, which names the path:
 
 ```sh
 devbox --why cargo build
-# devbox: sandbox denials since 2026-09-21 14:02:11:
-# ... (Sandbox) Sandbox: cargo(4812) deny(1) file-read-data /Users/me/.cargo/config.toml
+# devbox: sandbox denials since 2026-09-23 14:02:11:
+# ... (Sandbox) Sandbox: cargo(4812) deny(1) file-write-data /Users/me/.cargo/.package-cache
 ```
-
-`--allow-read PATH` and `--allow-write PATH` are repeatable and carve holes in
-the denies; `--allow-write` permits reads of the same path too, since a
-write-only directory is no use to a compiler. `--unsafe-read-anything` cancels
-the read allowlist for a single invocation, for when you're blocked and need to
-get on with it - writes and the network stay restricted. If you reach for it
-twice for the same reason, edit the arrays instead: `system_read`,
-`default_read` and `default_write`, near the top of `bin/devbox`.
 
 Three cases come up often:
 
@@ -142,29 +155,23 @@ Three cases come up often:
 - **npm** wants `~/.npm`; same reasoning. Better still, `npm ci --cache
   ./.npm-cache` keeps it inside the repo.
 
-- **Go** fails before it starts - `GOMODCACHE` (`~/go/pkg/mod`) isn't readable
-  and `GOCACHE` (`~/Library/Caches/go-build`) isn't writable. Widen both, or
-  keep them local with `GOFLAGS=-modcacherw GOMODCACHE=$PWD/.gomod
-  GOCACHE=$PWD/.gocache`. Gradle, Maven, pip, SwiftPM and Xcode's DerivedData
-  all have the same shape.
+- **Go** needs `GOCACHE` (`~/Library/Caches/go-build`) writable. Widen it, or
+  keep it local with `GOCACHE=$PWD/.gocache`. Gradle, Maven, pip, SwiftPM and
+  Xcode's DerivedData all have the same shape.
 
-Shell rc files aren't readable either, so you get a bare prompt. Add
-`--allow-read ~/.zshrc` (and whatever it sources) if you'd rather have your
-config than the isolation; `DEVBOX=1` is exported inside, so a prompt can say
-so.
+If you reach for the same flag twice, put it in `~/.config/devbox/allow-write`.
 
 ## Caveats
 
-- **Partly tested.** It runs: the profile compiles, `sandbox-exec` executes
-  the command, and the file rules behave as described - reads and writes
-  outside the allowlists are denied, and link creation is checked against the
-  source. Not yet exercised: the network stanza, where SBPL's spelling for
-  unix-socket filters has varied across releases; `--why`; and any real
-  toolchain end to end. The read allowlist is certainly still short of
-  something, which is what `--why` is for. The profile is generated rather than
-  hand-maintained, and `--print-profile` shows exactly what `sandbox-exec` will
-  be handed; if it fails to compile, `sandbox-exec` refuses to run the command
-  at all - it fails closed.
+- **Partly tested.** It runs: the profile compiles, `sandbox-exec` executes the
+  command, and the file rules behave as described - reads and writes outside
+  the policy are denied, and link creation is checked against the source. Not
+  yet exercised: the network stanza, where SBPL's spelling for unix-socket
+  filters has varied across releases; `--why`; and any real toolchain end to
+  end. The profile is generated rather than hand-maintained, and
+  `--print-profile` shows exactly what `sandbox-exec` will be handed; if it
+  fails to compile, `sandbox-exec` refuses to run the command at all - it fails
+  closed.
 
 - **`sandbox-exec` is deprecated.** It has carried the notice since macOS 10.10
   and still works in current releases; the underlying Seatbelt machinery is

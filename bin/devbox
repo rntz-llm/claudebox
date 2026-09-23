@@ -13,7 +13,6 @@ decides what the sandbox means.
 """
 
 import os
-import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -26,23 +25,22 @@ USAGE = """\
 usage: {prog} [options] [--] [command [args...]]
 
 Runs command (default: $SHELL) under a sandbox profile that allows writes only
-to the current directory and to temporary directories, allows reads only of the
-system, the toolchain and the current directory, and by default denies IP
-network access.
+to the current directory and to temporary directories, denies reads of your
+credentials and private data, and by default denies IP network access.
 
 options:
-  --network=yes|no        allow IP networking (default: no)
-  --allow-read PATH       also permit reads under PATH (repeatable)
-  --allow-write PATH      also permit writes under PATH (repeatable; also
-                          permits reads, since a write-only path is useless)
-  --why                   report the sandbox denials the command caused, after
-                          it exits. This is how you find out what to add.
-  --unsafe-read-anything  cancel the read allowlist entirely. An escape hatch
-                          for when something won't run and you need it to now,
-                          not a mode to live in; writes and network are
-                          unaffected.
-  --print-profile         print the generated sandbox profile and exit
-  -h, --help              this
+  --network=yes|no     allow IP networking (default: no)
+  --allow-read PATH    permit reads under PATH, overriding a deny (repeatable)
+  --allow-write PATH   permit writes under PATH (repeatable)
+  --why                report the sandbox denials the command caused, after it
+                       exits. This is how you find out what to add.
+  --print-profile      print the generated sandbox profile and exit
+  -h, --help           this
+
+Defaults are extended by two files, one path per line, '#' for a comment and a
+leading '!' to reverse a default:
+  {deny_read}
+  {allow_write}
 
 Option parsing stops at the first non-option argument, so flags meant for the
 command need no --:  {prog} cargo test --release
@@ -134,7 +132,6 @@ def parse_args(argv):
         "extra_read": [],
         "extra_write": [],
         "print_profile": False,
-        "read_anything": False,
         "why": False,
     }
 
@@ -162,14 +159,15 @@ def parse_args(argv):
         elif a.startswith("--allow-write="):
             opts["extra_write"].append(a[len("--allow-write="):])
             step = 1
-        elif a == "--unsafe-read-anything":
-            opts["read_anything"], step = True, 1
         elif a == "--why":
             opts["why"], step = True, 1
         elif a == "--print-profile":
             opts["print_profile"], step = True, 1
         elif a in ("-h", "--help"):
-            sys.stdout.write(USAGE.format(prog=PROG))
+            sys.stdout.write(USAGE.format(
+                prog=PROG,
+                deny_read=os.path.join(config_dir(), "deny-read"),
+                allow_write=os.path.join(config_dir(), "allow-write")))
             sys.exit(0)
         elif a == "--":
             i += 1
@@ -181,6 +179,38 @@ def parse_args(argv):
         i += step
 
     return opts, argv[i:]
+
+
+def config_dir():
+    xdg = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home(), ".config")
+    return os.path.join(xdg, "devbox")
+
+
+def read_config(name, plain, reversed_):
+    """One path per line; blank lines and lines starting with '#' ignored; a
+    leading '!' reverses the default sense of the file, so a deny-read file can
+    re-allow and an allow-write file can subtract. Returns (action, path) pairs
+    in file order. A missing file is not an error.
+
+    Only whole-line comments: a '#' is legal in a path, and silently truncating
+    someone's allowlist at one would be the wrong kind of surprise."""
+    rules = []
+    try:
+        with open(os.path.join(config_dir(), name)) as f:
+            lines = f.read().splitlines()
+    except FileNotFoundError:
+        return rules
+    except OSError as e:
+        die("cannot read %s: %s" % (os.path.join(config_dir(), name), e))
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("!"):
+            rules.append((reversed_, line[1:].strip()))
+        else:
+            rules.append((plain, line))
+    return rules
 
 
 def check_allow(flag, paths):
@@ -195,129 +225,157 @@ def check_allow(flag, paths):
             die(e)
 
 
-# ---------- WHAT THE SANDBOX ALLOWS ----------
-
-# Read access to the system itself. Deliberately broad: these are the most
-# stable paths in macOS, they're world-readable anyway, and narrowing them is
-# how a sandbox turns into something you stop using. Note what is *not* here:
-# /Volumes (a mounted Time Machine disk is a copy of your home directory),
-# /Users (see DEFAULT_READ), and /private/var/folders beyond the scratch
-# directories below.
-SYSTEM_READ = [
-    "/bin",
-    "/sbin",
-    "/usr",
-    "/System",
-    "/Library",
-    "/Applications",
-    "/opt",
-    "/private/etc",
-    "/private/var/db",  # zoneinfo, among other things; the rest is root-owned
-    "/private/var/run",
-    "/dev",
-]
-
-# Scratch space. $TMPDIR is a per-user directory under /private/var/folders,
-# which also holds per-user caches; /tmp and /var/tmp are world-writable
-# already, so permitting them concedes nothing that a process running as you
-# couldn't already do.
-DEFAULT_WRITE = [
-    "/private/var/folders",
-    "/private/tmp",
-    "/private/var/tmp",
-]
-
-
-def default_read(cmd):
-    """Toolchain configuration that dev tools need in order to work at all.
-    Cargo's and npm's shared caches are deliberately *not* writable -- see
-    DEVBOX.md."""
-    paths = [
-        os.path.join(home(), ".gitconfig"),
-        os.path.join(home(), ".gitexclude"),
-        os.path.join(home(), ".config/git"),
-        os.path.join(home(), ".rustup"),
-        os.path.join(home(), ".cargo"),
-    ]
-    # To run a command you have to be able to read it. This matters for tools
-    # installed under $HOME, like ~/.local/bin/claude, but also for anything
-    # outside the system prefixes above. The containing directory, not just the
-    # binary, because wrappers commonly exec a sibling.
-    cmd_path = shutil.which(cmd[0])
-    if cmd_path and cmd_path.startswith("/"):
-        paths.append(_split(cmd_path)[0])
-    return paths
-
-
-def filters(paths):
-    """One SBPL filter line per path, resolved and vetted. subpath matches the
-    path itself as well as anything under it, so it covers plain files too."""
-    lines = []
-    for p in paths:
-        # A path that doesn't exist is not an error here: allowlists name
-        # things like caches that a tool may create later, and permitting a
-        # path that never appears costs nothing.
-        try:
-            r = resolve(p)
-        except ResolveError:
-            continue
-        reject_unquotable(r)
-        # (subpath "/") would silently cancel the entire allowlist.
-        if r == "/":
-            die("‘/’ as an allowlist entry would permit everything; "
-                "use --unsafe-read-anything if that is what you mean.")
-        lines.append('       (subpath "%s")' % r)
-    return "\n".join(lines)
-
-
-# ---------- THE PROFILE ----------
-# SBPL is last-match-wins, so every deny below is followed by the allows that
-# carve holes in it; reordering them silently changes the meaning.
+# ---------- POLICY ----------
+# Reads are allowed by default and taken away by name; writes are denied by
+# default and given back by name. The asymmetry is deliberate. "Files my dev
+# environment reads" is long, personal and open-ended, so enumerating it
+# produces a sandbox that breaks constantly and stops being used; "files that
+# are secrets" is short and close to universal. Writes are the opposite:
+# almost nothing legitimately writes outside the repo and its caches, so
+# enumerating those costs little and catches a lot.
 #
-# The base is (allow default), and the three things that matter for the threat
-# model are taken away. That is not the same as (deny default), which would
-# additionally close operation classes -- process-exec, mach-lookup, sysctl,
-# iokit, pseudo-tty -- that ordinary dev tooling needs and that would have to
-# be enumerated and re-enumerated against an undocumented, version-specific
-# list. Files and network are denied by default *within* an allow-default base,
-# which is where the security is; see DEVBOX.md.
+# The cost of this shape is that a secret somewhere nobody listed stays
+# readable. With the network off by default that is staged exfiltration rather
+# than exfiltration, which is the trade being made. See DEVBOX.md.
 
-PROFILE = '''(version 1)
-(allow default)
+# Credentials and keys, relative to $HOME.
+DENY_READ_HOME = [
+    ".ssh", ".gnupg", ".aws", ".azure", ".config/gcloud", ".kube", ".docker",
+    ".netrc", ".authinfo", ".authinfo.gpg", ".password-store", ".terraform.d",
+    ".npmrc", ".pypirc", ".gem/credentials", ".cargo/credentials.toml",
+    ".config/gh", ".config/glab-cli", ".config/op", ".1password",
+    ".claude", ".config/anthropic", ".local/share/keyrings",
+]
 
-;; ---- writes: the working directory and scratch space, nothing else ----
-(deny file-write*)
-(allow file-write*
-{write_filters})
-;; The character devices everything expects to be able to write to.
-(allow file-write*
+# ~/Library is denied wholesale: it is the highest secret density on the
+# machine (Cookies alone are session tokens for everything you are logged in
+# to) and the least enumerable. The dev-relevant subtrees are given back
+# below -- an allowlist inside a denylist, worth the complication just here.
+LIBRARY_ALLOW = [
+    "Library/Developer",   # Xcode: toolchains, SDKs, DerivedData
+    "Library/Caches",      # Homebrew, pip, go-build, SwiftPM, CocoaPods
+    "Library/Fonts",
+    "Library/Android",
+    "Library/Python",
+    "Library/pnpm",
+]
+# ...except the parts of Caches that are somebody's browsing history.
+LIBRARY_REDENY = [
+    "Library/Caches/com.apple.Safari",
+    "Library/Caches/Google",
+    "Library/Caches/Firefox",
+    "Library/Caches/BraveSoftware",
+]
+
+DENY_READ_ABS = [
+    "/Volumes",                 # a mounted Time Machine disk is a copy of $HOME
+    "/private/var/db/dslocal",  # local account password hashes
+]
+
+
+def default_write():
+    """Scratch space. $TMPDIR is the per-user directory under
+    /private/var/folders; the sibling C/ holds per-user caches that
+    unsandboxed processes trust, so the tree as a whole is not included.
+    /tmp and /var/tmp are world-writable already."""
+    tmpdir = os.environ.get("TMPDIR") or "/private/var/folders"
+    return [tmpdir, "/private/tmp", "/private/var/tmp"]
+
+
+# The character devices everything expects to be able to write to. Not
+# subpaths, so this is a fixed stanza rather than a rule.
+DEVICE_WRITES = '''(allow file-write*
        (literal "/dev/null")
        (literal "/dev/zero")
        (literal "/dev/random")
        (literal "/dev/urandom")
        (literal "/dev/dtracehelper")
        (literal "/dev/tty")
+       (literal "/dev/ptmx")
        (subpath "/dev/fd")
-       (regex #"^/dev/ttys[0-9]+"))
+       (regex #"^/dev/ttys[0-9]+$"))'''
 
-;; ---- reads: nothing, then an allowlist ----
-;; Denied everywhere rather than just under /Users, so that a path nobody
-;; thought to enumerate -- a Time Machine volume under /Volumes, the
-;; /System/Volumes/Data spelling of your home directory, a checkout under /opt
-;; -- is closed by default instead of open by default.
-(deny file-read*)
-;; Metadata only, everywhere, so that stat() and path-walking work while
-;; contents stay unreadable.
-(allow file-read-metadata)
-;; The root directory itself, so that readdir("/") works.
-(allow file-read* (literal "/"))
-(allow file-read*
-{read_filters})'''
 
-READ_ANYTHING = '''
+def vet(path):
+    """Resolve and check a rule's path. Raises ResolveError if it names
+    something that isn't there: a default naming a tool you haven't installed
+    is normal, not an error."""
+    r = resolve(path)
+    reject_unquotable(r)
+    # (subpath "/") as an allow would cancel every deny below it, and as a
+    # deny would shut the machine. Neither is ever meant.
+    if r == "/":
+        die("‘/’ is not a usable rule: name a directory under it.")
+    return r
 
-;; ---- --unsafe-read-anything: the allowlist above is cancelled ----
-(allow file-read*)'''
+
+def stanzas(rules, op):
+    """Render (action, path) pairs as SBPL, one stanza per run of like
+    actions. The order is the meaning: SBPL is last-match-wins, so a later
+    rule overrides an earlier one and reordering these changes the policy."""
+    out, kind, pending = [], None, []
+
+    def flush():
+        if pending:
+            body = "\n".join('       (subpath "%s")' % q for q in pending)
+            out.append("(%s %s\n%s)" % (kind, op, body))
+
+    for action, path in rules:
+        try:
+            r = vet(path)
+        except ResolveError:
+            continue
+        if action != kind:
+            flush()
+            kind, pending = action, []
+        pending.append(r)
+    flush()
+    return "\n".join(out)
+
+
+def read_ruleset(cwd, opts):
+    h = home()
+    rules = [("deny", "/Users"), ("allow", h)]   # other users' homes stay shut
+    rules += [("deny", p) for p in DENY_READ_ABS]
+    rules += [("deny", os.path.join(h, p)) for p in DENY_READ_HOME]
+    rules.append(("deny", os.path.join(h, "Library")))
+    rules += [("allow", os.path.join(h, p)) for p in LIBRARY_ALLOW]
+    rules += [("deny", os.path.join(h, p)) for p in LIBRARY_REDENY]
+    # Which paths are protected is itself a hint worth not handing over.
+    rules.append(("deny", config_dir()))
+    rules += read_config("deny-read", "deny", "allow")
+    rules += [("allow", p) for p in opts["extra_read"]]
+    # Last, so the repo can always read itself whatever else matched.
+    rules.append(("allow", cwd))
+    return rules
+
+
+def write_ruleset(cwd, opts):
+    rules = [("allow", cwd)] + [("allow", p) for p in default_write()]
+    # Repo-supplied code that can edit these gets to run commands later,
+    # outside the sandbox, the next time you touch the repo with git:
+    # core.fsmonitor, core.sshCommand and diff.*.textconv all execute.
+    rules += [("deny", os.path.join(cwd, ".git/hooks")),
+              ("deny", os.path.join(cwd, ".git/config"))]
+    # After the .git denies, so naming one of them in the config reverses it.
+    rules += read_config("allow-write", "allow", "deny")
+    rules += [("allow", p) for p in opts["extra_write"]]
+    return rules
+
+
+PROFILE = '''(version 1)
+(allow default)
+
+;; ---- writes: the working directory and scratch space, nothing else ----
+(deny file-write*)
+{write_rules}
+;; The character devices everything expects to be able to write to.
+{device_writes}
+
+;; ---- reads: everything, minus what is worth stealing ----
+{read_rules}
+;; Metadata everywhere regardless, so that stat() and path-walking work.
+(allow file-read-metadata)'''
 
 NO_NETWORK = '''
 
@@ -332,26 +390,35 @@ NO_NETWORK = '''
        (subpath "/private/var/folders"))'''
 
 
-def build_profile(cwd, cmd, opts):
-    # Everything writable is also readable: a write-only directory is not a
-    # useful thing to hand a compiler, and under a global read deny you have to
-    # say so.
-    write_paths = [cwd] + DEFAULT_WRITE + opts["extra_write"]
-    read_paths = SYSTEM_READ + default_read(cmd) + write_paths + opts["extra_read"]
+def build_profile(cwd, opts):
+    reads = read_ruleset(cwd, opts)
+    writes = write_ruleset(cwd, opts)
 
-    read_filters = filters(read_paths)
-    write_filters = filters(write_paths)
+    # The final (allow file-read* (subpath cwd)) would override any deny the
+    # working directory happens to fall under, so refuse rather than quietly
+    # undo one: `cd ~/.ssh && devbox` is a mistake, not a request.
+    for action, path in reads:
+        if action != "deny":
+            continue
+        try:
+            d = vet(path)
+        except ResolveError:
+            continue
+        if cwd == d or cwd.startswith(d + "/"):
+            die("refusing to run in ‘%s’: it is inside ‘%s’, "
+                "which is on the read denylist." % (cwd, d))
 
-    # An empty filter list renders as a bare `(allow file-read*)`, which
-    # cancels the deny above it and allows everything. Both lists contain the
-    # working directory, so this can't happen today -- but the failure is
-    # silent and total, so assert it.
-    if not read_filters or not write_filters:
-        die("internal error: empty allowlist would permit everything.")
+    write_rules = stanzas(writes, "file-write*")
+    # A bare `(allow file-write*)` -- what an empty stanza renders as -- would
+    # cancel the deny above it and make the whole filesystem writable.
+    if "(allow file-write*\n" not in write_rules:
+        die("internal error: no writable path; the profile would be unsafe.")
 
-    profile = PROFILE.format(read_filters=read_filters, write_filters=write_filters)
-    if opts["read_anything"]:
-        profile += READ_ANYTHING
+    profile = PROFILE.format(
+        write_rules=write_rules,
+        device_writes=DEVICE_WRITES,
+        read_rules=stanzas(reads, "file-read*"),
+    )
     if opts["network"] == "no":
         profile += NO_NETWORK
     return profile
@@ -415,7 +482,7 @@ def main():
             "directory, not a home directory or the root of the filesystem." % cwd)
     reject_unquotable(cwd)
 
-    profile = build_profile(cwd, cmd, opts)
+    profile = build_profile(cwd, opts)
 
     if opts["print_profile"]:
         print(profile)
@@ -425,11 +492,8 @@ def main():
     os.environ["DEVBOX"] = "1"
 
     if sys.stderr.isatty():
-        print("%s: ‘%s’ writable, network %s, reads outside the "
-              "allowlist denied." % (PROG, cwd, opts["network"]), file=sys.stderr)
-    if opts["read_anything"]:
-        print("%s: --unsafe-read-anything: every readable file on the machine "
-              "is readable in here." % PROG, file=sys.stderr)
+        print("%s: ‘%s’ writable, network %s, credentials unreadable."
+              % (PROG, cwd, opts["network"]), file=sys.stderr)
 
     if not opts["why"]:
         os.execv(SANDBOX_EXEC, [SANDBOX_EXEC, "-p", profile] + cmd)
