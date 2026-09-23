@@ -16,6 +16,14 @@ Deviations from the plan as written, all decided in review:
 - The `/System/Volumes/Data` both-spellings work turned out to be
   unnecessary; see the firmlink section.
 
+- Resolution failures are split into "missing" and "broken". A deny is
+  emitted whether or not its target exists; a broken path -- a symlink loop,
+  an unreadable parent -- is fatal wherever it appears. Silently skipping an
+  unresolvable rule was safe when every rule was an allow, and stopped being
+  safe once denies existed: repo code could delete the `.git/hooks` deny by
+  making that path a symlink loop, since the working directory is the one
+  place it can write.
+
 ---
 
 Not implemented. This records the design and the reasoning so it can be picked

@@ -25,8 +25,8 @@ USAGE = """\
 usage: {prog} [options] [--] [command [args...]]
 
 Runs command (default: $SHELL) under a sandbox profile that allows writes only
-to the current directory and to temporary directories, denies reads of your
-credentials and private data, and by default denies IP network access.
+to the current directory and to temporary directories, denies reads to some
+sensitive directories, and by default denies network access.
 
 options:
   --network=yes|no     allow IP networking (default: no)
@@ -46,19 +46,26 @@ Option parsing stops at the first non-option argument, so flags meant for the
 command need no --:  {prog} cargo test --release
 """
 
-
 def die(msg):
     print("%s: %s" % (PROG, msg), file=sys.stderr)
     sys.exit(1)
 
-
 class ResolveError(Exception):
-    """A path that can't be turned into an absolute physical path. Fatal when
-    the user named it explicitly, ignorable when it came from a default list."""
+    """A path that can't be turned into an absolute physical path.
 
+    `missing` separates "you don't have this installed", which a default list
+    may harmlessly name, from "this is broken" -- a symlink loop, an
+    unreadable parent. The second is never ignorable: silently dropping a rule
+    is how a deny disappears, and the working directory is writable by the
+    code we are trying to contain, so a path a rule names is a path that code
+    can tamper with."""
 
+    def __init__(self, msg, missing=False):
+        super().__init__(msg)
+        self.missing = missing
+
+
 # ---------- PATHS ----------
-
 def _split(p):
     """POSIX dirname/basename, which differ from os.path for trailing slashes
     and for bare names."""
@@ -71,13 +78,32 @@ def _split(p):
     return head, base
 
 
-def resolve(p):
+def longest_existing(p):
+    """The longest existing ancestor of p, resolved, with the missing tail
+    re-attached. A deny does not need its target to exist, and emitting it
+    anyway closes the window in which something creates the path after the
+    profile has been built."""
+    tail = []
+    head = p
+    while not os.path.isdir(head):
+        nxt, base = _split(head)
+        if nxt == head:
+            return None
+        tail.append(base)
+        head = nxt
+    head = os.path.realpath(head)
+    for base in reversed(tail):
+        head = "/" + base if head == "/" else head + "/" + base
+    return head
+
+
+def resolve(p, missing_ok=False):
     """Absolute physical path. Does not error if the file does not exist yet,
     but resolves its directory path fully.
 
     It's important that we fully resolve things because sandbox-exec/macOS
-    Seatbelt matches the resolved physical path, so otherwise denying reads of
-    a symlinked file wouldn't deny reads of that file.
+    Seatbelt matches the resolved physical path, so otherwise e.g. denying reads
+    to a symlinked file wouldn't work properly.
     """
     original = p
     # A literal tilde, from a quoted argument the shell didn't expand.
@@ -92,17 +118,24 @@ def resolve(p):
         if links > 40:
             raise ResolveError(
                 "‘%s’ is more than 40 symlinks deep; a loop?" % original)
-        target = os.readlink(p)
+        try:
+            target = os.readlink(p)
+        except OSError as e:
+            raise ResolveError("cannot read the symlink %s: %s" % (p, e))
         p = target if target.startswith("/") else os.path.join(_split(p)[0], target)
 
     if os.path.isdir(p):
         return os.path.realpath(p)
 
     head, base = _split(p)
-    if not os.path.isdir(head):
-        raise ResolveError("no such directory: %s" % head)
-    head = os.path.realpath(head)
-    return "/" + base if head == "/" else head + "/" + base
+    if os.path.isdir(head):
+        head = os.path.realpath(head)
+        return "/" + base if head == "/" else head + "/" + base
+    if missing_ok:
+        r = longest_existing(p)
+        if r is not None:
+            return r
+    raise ResolveError("no such directory: %s" % head, missing=True)
 
 
 def reject_unquotable(p):
@@ -296,11 +329,11 @@ DEVICE_WRITES = '''(allow file-write*
        (regex #"^/dev/ttys[0-9]+$"))'''
 
 
-def vet(path):
+def vet(path, missing_ok=False):
     """Resolve and check a rule's path. Raises ResolveError if it names
     something that isn't there: a default naming a tool you haven't installed
     is normal, not an error."""
-    r = resolve(path)
+    r = resolve(path, missing_ok=missing_ok)
     reject_unquotable(r)
     # (subpath "/") as an allow would cancel every deny below it, and as a
     # deny would shut the machine. Neither is ever meant.
@@ -322,9 +355,13 @@ def stanzas(rules, op):
 
     for action, path in rules:
         try:
-            r = vet(path)
-        except ResolveError:
-            continue
+            # A deny is emitted whether or not its target exists; an allow
+            # for a path that never appears costs nothing, so it is dropped.
+            r = vet(path, missing_ok=(action == "deny"))
+        except ResolveError as e:
+            if e.missing and action == "allow":
+                continue
+            die("%s (%s rule)" % (e, action))
         if action != kind:
             flush()
             kind, pending = action, []
@@ -401,7 +438,7 @@ def build_profile(cwd, opts):
         if action != "deny":
             continue
         try:
-            d = vet(path)
+            d = vet(path, missing_ok=True)
         except ResolveError:
             continue
         if cwd == d or cwd.startswith(d + "/"):
