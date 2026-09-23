@@ -20,8 +20,9 @@ devbox --print-profile            # see exactly what the profile says
 
 ## What it allows
 
-- **Writes** - the current directory, `$TMPDIR`, `/tmp`, `/var/tmp`, and the
-  usual writable character devices. Nothing else: not your dotfiles, not
+- **Writes** - the current directory, `/private/var/folders` (which holds
+  `$TMPDIR` and the per-user caches), `/tmp`, `/var/tmp`, and the usual
+  writable character devices. Nothing else: not your dotfiles, not
   `~/.ssh/config`, not a launch agent, not another repo.
 
 - **Reads** - the system (`/usr`, `/bin`, `/sbin`, `/System`, `/Library`,
@@ -32,8 +33,8 @@ devbox --print-profile            # see exactly what the profile says
   directories above, and the current directory. Everything else is denied,
   including what nobody would think to enumerate: `~/.aws`, `~/.ssh`,
   `~/.netrc`, `~/.config/gh/hosts.yml`, a Time Machine volume under `/Volumes`,
-  the `/System/Volumes/Data/Users/…` spelling of your own home directory.
-  `stat` is permitted everywhere, so path-walking still works.
+  a checkout under `/opt`. `stat` is permitted everywhere, so path-walking
+  still works.
 
 - **IP networking** - none, unless you pass `--network=yes`. Unix-domain
   sockets stay reachable either way; denying them breaks the DNS resolver,
@@ -83,9 +84,11 @@ breaks every autumn and stops getting used.
   then there are `.envrc`, `Makefile`, `package.json` scripts.
   `git -c core.hooksPath=/dev/null` covers hooks and nothing else.
 
-- **Symlinks out of the repo.** Rules apply to resolved paths, so a symlink
-  pointing at `~/.ssh` gains nothing - but a symlinked subdirectory of the repo
-  that really lives elsewhere isn't writable, which can surprise you.
+- **Links are not an escape, but they can surprise you.** Rules match the
+  path a file resolves to, so a symlink pointing at `~/.ssh` gains nothing, and
+  creating a hardlink is checked against the source for both read and write.
+  The flip side: a symlinked subdirectory of the repo that really lives
+  elsewhere isn't writable.
 
 - **TCC-protected resources** (camera, microphone, Contacts, Desktop,
   Documents). Governed by your *terminal's* grants, not by this profile. If
@@ -116,7 +119,7 @@ path to add:
 ```sh
 devbox --why cargo build
 # devbox: sandbox denials since 2026-09-21 14:02:11:
-# Sandbox: cargo(4812) deny(1) file-read-data /Users/me/.cargo/config.toml
+# ... (Sandbox) Sandbox: cargo(4812) deny(1) file-read-data /Users/me/.cargo/config.toml
 ```
 
 `--allow-read PATH` and `--allow-write PATH` are repeatable and carve holes in
@@ -152,13 +155,16 @@ so.
 
 ## Caveats
 
-- **Untested.** Written and reviewed, but not yet run on macOS. The profile is
-  generated rather than hand-maintained, and `--print-profile` shows exactly
-  what `sandbox-exec` will be handed. Two places to expect iteration: the read
-  allowlist, which is what `--why` is for, and the network stanza, where SBPL's
-  spelling for unix-socket filters has varied across releases. If the profile
-  fails to compile, `sandbox-exec` refuses to run the command at all - it fails
-  closed.
+- **Partly tested.** It runs: the profile compiles, `sandbox-exec` executes
+  the command, and the file rules behave as described - reads and writes
+  outside the allowlists are denied, and link creation is checked against the
+  source. Not yet exercised: the network stanza, where SBPL's spelling for
+  unix-socket filters has varied across releases; `--why`; and any real
+  toolchain end to end. The read allowlist is certainly still short of
+  something, which is what `--why` is for. The profile is generated rather than
+  hand-maintained, and `--print-profile` shows exactly what `sandbox-exec` will
+  be handed; if it fails to compile, `sandbox-exec` refuses to run the command
+  at all - it fails closed.
 
 - **`sandbox-exec` is deprecated.** It has carried the notice since macOS 10.10
   and still works in current releases; the underlying Seatbelt machinery is
