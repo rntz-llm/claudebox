@@ -21,8 +21,7 @@ from datetime import datetime
 from typing import NoReturn
 
 # A policy directive: action is "allow" or "deny", op is "read" or "write".
-# Order is the meaning -- SBPL is last-match-wins -- so these travel as one
-# ordered stream and are split by op only at the moment of rendering.
+# Order is important: SBPL (SeatBelt Profile Language) is last-match-wins.
 Directive = tuple[str, str, str]  # (action, op, path)
 Rule = tuple[str, str]            # (action, path), within a single op
 
@@ -118,10 +117,9 @@ def vet(path: str) -> str:
 
 
 # -------------------- ARGUMENTS --------------------
-
 @dataclass
 class Options:
-    network: str = "no"
+    network: bool = False
     # One ordered list, not one per op, so that every --allow/--deny keeps its
     # position relative to all the others: `--allow-write X --deny-read X` and
     # the reverse mean different things.
@@ -129,32 +127,37 @@ class Options:
     print_profile: bool = False
     why: bool = False
 
-VALUE_FLAGS = ("--network", "--allow-read", "--deny-read",
-               "--allow-write", "--deny-write")
+DIRECTIVE_FLAGS = ("--allow-read", "--deny-read", "--allow-write", "--deny-write")
+VALUE_FLAGS = ("--network",) + DIRECTIVE_FLAGS
 
 def parse_args(argv: list[str]) -> tuple[Options, list[str]]:
-    """Hand-rolled rather than argparse, which cannot express "stop at the
-    first non-option argument" -- the property that lets you write
-    `devbox cargo test --release` with no `--`. REMAINDER misbehaves when the
-    remainder starts with something option-shaped, and parse_known_args
-    scatters the command's own flags into the unrecognised pile."""
+    """Hand-rolled because argparse cannot express “stop at the first non-option
+    argument” -- so we can't write `devbox cargo test --release` with no `--`.
+    REMAINDER misbehaves when the remainder starts with something option-shaped,
+    and parse_known_args scatters the command's own flags into the unrecognised
+    pile.
+    """
     opts = Options()
     i = 0
     while i < len(argv):
         arg, step = argv[i], 1
         name, eq, inline = arg.partition("=")
         if name in VALUE_FLAGS:
-            # Both `--flag=VALUE` and `--flag VALUE`. A trailing `--flag` with
-            # nothing after it yields "", which the checks below reject.
-            if eq:
-                value = inline
+            # Both `--flag=VALUE` and `--flag VALUE`.
+            if eq: value = inline
+            elif i + 1 < len(argv): value = argv[i + 1]
             else:
-                value, step = (argv[i + 1] if i + 1 < len(argv) else ""), 2
+                die(f"{name}: no argument supplied.")
             if name == "--network":
-                opts.network = value
-            else:
-                action, _, op = name[2:].partition("-")  # --allow-read
+                if value not in ("yes", "no"):
+                    die(f"--network takes ‘yes’ or ‘no’, not ‘{value}’.")
+                opts.network = value == "yes"
+            elif name in DIRECTIVE_FLAGS: # --(allow|deny)-(read|write)
+                action, _, op = name[2:].partition("-")
+                assert action in ("allow", "deny") and op in ("read", "write")
                 opts.directives.append((action, op, value))
+            else:
+                assert False, f"Unimplemented flag: {name}"
         elif arg == "--why":
             opts.why = True
         elif arg == "--print-profile":
@@ -430,7 +433,7 @@ def build_profile(cwd: str, opts: Options) -> str:
     profile = PROFILE.format(write_rules=write_rules,
                              read_rules=read_rules,
                              device_writes=DEVICE_WRITES)
-    return profile + NO_NETWORK if opts.network == "no" else profile
+    return profile if opts.network else profile + NO_NETWORK
 
 
 # -------------------- RUNNING --------------------
@@ -477,8 +480,6 @@ def main() -> int:
 
     cwd = os.getcwd()
     opts, rest = parse_args(sys.argv[1:])
-    if opts.network not in ("yes", "no"):
-        die(f"--network takes ‘yes’ or ‘no’, not ‘{opts.network}’.")
     check_flag_rules(opts.directives)
     cmd = rest or [os.environ.get("SHELL") or "/bin/bash"]
 
@@ -492,9 +493,6 @@ def main() -> int:
 
     # Marks the shell as sandboxed for anyone who wants to say so in a prompt.
     os.environ["DEVBOX"] = "1"
-    if sys.stderr.isatty():
-        print(f"{PROG}: ‘{cwd}’ writable, network {opts.network}, "
-              "credentials unreadable.", file=sys.stderr)
 
     if not opts.why:
         os.execv(SANDBOX_EXEC, [SANDBOX_EXEC, "-p", profile] + cmd)
