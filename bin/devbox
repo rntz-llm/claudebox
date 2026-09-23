@@ -395,9 +395,11 @@ PROFILE = '''(version 1)
 
 ;; ---- writes: the working directory and scratch space, nothing else ----
 (deny file-write*)
-{write_rules}
-;; The character devices everything expects to be able to write to.
+;; The character devices everything expects to be able to write to. First, so
+;; that a later rule of yours could take one away; nothing in the defaults
+;; matches /dev, so nothing does.
 {device_writes}
+{write_rules}
 
 ;; ---- reads: everything, minus what is worth stealing ----
 {read_rules}
