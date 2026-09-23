@@ -52,18 +52,31 @@ fi
 
 # ---------- PATHS ----------
 
-# Absolute physical path. Directories resolve wholesale; anything else has its
-# parent resolved and the basename appended, so a path that doesn't exist yet
-# (a cache file a tool will create) still works. macOS has no portable
-# `readlink -f`, hence the shell version.
+# Absolute physical path. Does not error if the file does not exist yet, but resolves its
+# directory path fully. macOS has no portable `readlink -f`, hence the shell version.
+#
+# It's important that we fully resolve things because sandbox-exec/macOS Seatbelt matches
+# the resolved physical path, so otherwise `--deny-read a-symlinked-file` wouldn't deny
+# reads to that file.
 resolve() {
-    local p="$1" dir base
+    local p="$1" dir base target links=0
     # A literal tilde, from a quoted argument the shell didn't expand.
     # shellcheck disable=SC2088
     case "$p" in
         "~")   p="$HOME" ;;
         "~/"*) p="$HOME/${p#\~/}" ;;
     esac
+    while [[ -L "$p" ]]; do
+        if (( ++links > 40 )); then
+            echo "$prog: ‘$1’ is more than 40 symlinks deep; a loop?" >&2
+            return 1
+        fi
+        target="$(readlink "$p")"
+        case "$target" in
+            /*) p="$target" ;;
+            *)  p="$(dirname "$p")/$target" ;;
+        esac
+    done
     if [[ -d "$p" ]]; then
         (cd "$p" && pwd -P)
         return
