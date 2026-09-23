@@ -1,8 +1,7 @@
 #!/usr/bin/python3 -I
 """Run a command against the current directory under a macOS sandbox, so that
 repo-supplied code -- git hooks, build scripts, dependencies -- can't write
-outside the repo, read anything outside a fixed allowlist, or talk to the
-network. See DEVBOX.md.
+outside the repo, read your credentials, or talk to the network. See DEVBOX.md.
 
 The shebang is deliberate. `-I` (isolated) ignores PYTHONPATH/PYTHONHOME, drops
 the user site directory, and keeps this script's own directory off sys.path;
@@ -13,14 +12,20 @@ decides what the sandbox means.
 """
 
 import errno
+import itertools
 import os
 import subprocess
 import sys
+from dataclasses import dataclass, field
 from datetime import datetime
+from typing import NoReturn
 
 PROG = os.path.basename(sys.argv[0])
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 LOG = "/usr/bin/log"
+
+# An ordered (action, path) pair, where action is "allow" or "deny".
+Rule = tuple[str, str]
 
 USAGE = """\
 usage: {prog} [options] [--] [command [args...]]
@@ -47,38 +52,51 @@ Option parsing stops at the first non-option argument, so flags meant for the
 command need no --:  {prog} cargo test --release
 """
 
-def die(msg):
-    print("%s: %s" % (PROG, msg), file=sys.stderr)
+def die(msg) -> NoReturn:
+    print(f"{PROG}: {msg}", file=sys.stderr)
     sys.exit(1)
+
+def home() -> str:
+    h = os.environ.get("HOME")
+    if not h:
+        die("HOME is not set.")
+    return h
+
+def config_dir() -> str:
+    xdg = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home(), ".config")
+    return os.path.join(xdg, "devbox")
+
+def usage() -> str:
+    return USAGE.format(prog=PROG,
+                        deny_read=os.path.join(config_dir(), "deny-read"),
+                        allow_write=os.path.join(config_dir(), "allow-write"))
+
+# ---------- PATHS ----------
 
 class ResolveError(Exception):
     """A path that can't be turned into an absolute physical path.
 
     `missing` separates "you don't have this installed", which a default list
-    may harmlessly name, from "this is broken" -- a symlink loop, an
-    unreadable parent. The second is never ignorable: silently dropping a rule
-    is how a deny disappears, and the working directory is writable by the
-    code we are trying to contain, so a path a rule names is a path that code
-    can tamper with."""
+    may harmlessly name, from "this is broken" -- a symlink loop, an unreadable
+    parent. The second is never ignorable: silently dropping a rule is how a
+    deny disappears, and the working directory is writable by the code we are
+    trying to contain, so a path a rule names is a path that code can tamper
+    with."""
 
-    def __init__(self, msg, missing=False):
+    def __init__(self, msg: str, missing: bool = False):
         super().__init__(msg)
         self.missing = missing
 
-
-# ---------- PATHS ----------
-def resolve(p, missing_ok=False):
+def resolve(p: str, missing_ok: bool = False) -> str:
     """Absolute physical path, with every symlink resolved, because Seatbelt
-    matches the path an operation resolves to rather than the one it was
-    handed.
+    matches the path an operation resolves to rather than the one it was handed.
 
     realpath() does the resolving, including the case that matters for rules
     naming a cache a tool has not created yet: it resolves as far as the path
-    exists and re-attaches the rest. What it will not tell us is *why* it
-    could not finish, so os.stat() is asked first -- ELOOP for a cycle,
-    ENOENT/ENOTDIR for something simply absent. The distinction is the whole
-    point: absent is ordinary, broken is not.
-    """
+    exists and re-attaches the rest. What it will not tell us is *why* it could
+    not finish, so os.stat() is asked first -- ELOOP for a cycle, ENOENT or
+    ENOTDIR for something simply absent. That distinction is the whole point:
+    absent is ordinary, broken is not."""
     p = os.path.expanduser(p)
     try:
         os.stat(p)
@@ -87,146 +105,126 @@ def resolve(p, missing_ok=False):
         if e.errno not in (errno.ENOENT, errno.ENOTDIR):
             # ELOOP, or a parent we aren't allowed to traverse. Either way the
             # path is not what it claims to be, and guessing would be worse.
-            raise ResolveError("%s: %s" % (p, e.strerror))
-
-    # Not there. A deny doesn't care -- it is cheaper to forbid a path that
-    # never appears than to leave a window open if it does. An allow does
-    # care, at least about the parent, so that a typo surfaces here instead of
-    # as a mysterious denial later.
+            raise ResolveError(f"{p}: {e.strerror}")
+    # Not there. A deny doesn't care -- forbidding a path that never appears is
+    # cheaper than leaving a window open if it does. An allow does care, at
+    # least about the parent, so that a typo surfaces here rather than later as
+    # a mysterious denial.
     head = os.path.dirname(p.rstrip("/")) or "."
     if not missing_ok and not os.path.isdir(head):
-        raise ResolveError("no such directory: %s" % head, missing=True)
+        raise ResolveError(f"no such directory: {head}", missing=True)
     return os.path.realpath(p)
 
-
-def reject_unquotable(p):
-    """Profile paths are interpolated into a double-quoted SBPL string, and
-    SBPL has no way to express a literal quote or backslash inside one."""
+def vet(path: str, missing_ok: bool = False) -> str:
+    """Resolve a rule's path and check it can be written into the profile."""
+    p = resolve(path, missing_ok=missing_ok)
+    # Paths are interpolated into a double-quoted SBPL string, and SBPL cannot
+    # express a literal quote or backslash inside one.
     if '"' in p or "\\" in p or "\n" in p:
-        die("refusing path with a quote, backslash or newline: %s" % p)
-
-
-def home():
-    h = os.environ.get("HOME")
-    if not h:
-        die("HOME is not set.")
-    return h
-
+        die(f"refusing path with a quote, backslash or newline: {p}")
+    # (subpath "/") as an allow would cancel every deny below it, and as a deny
+    # would shut the machine. Neither is ever meant.
+    if p == "/":
+        die("‘/’ is not a usable rule: name a directory under it.")
+    return p
 
 # ---------- ARGUMENTS ----------
 
-def parse_args(argv):
+@dataclass
+class Options:
+    network: str = "no"
+    allow_read: list[str] = field(default_factory=list)
+    allow_write: list[str] = field(default_factory=list)
+    print_profile: bool = False
+    why: bool = False
+
+def parse_args(argv: list[str]) -> tuple[Options, list[str]]:
     """Hand-rolled rather than argparse, which cannot express "stop at the
     first non-option argument" -- the property that lets you write
-    `devbox cargo test --release` with no `--`. REMAINDER is buggy when the
+    `devbox cargo test --release` with no `--`. REMAINDER misbehaves when the
     remainder starts with something option-shaped, and parse_known_args
     scatters the command's own flags into the unrecognised pile."""
-    opts = {
-        "network": "no",
-        "extra_read": [],
-        "extra_write": [],
-        "print_profile": False,
-        "why": False,
-    }
-
-    def value(i):
-        """`--flag VALUE`; a trailing `--flag` with nothing after it yields the
-        empty string, which the checks below turn into an error."""
-        return (argv[i + 1], 2) if i + 1 < len(argv) else ("", 1)
-
+    opts = Options()
     i = 0
     while i < len(argv):
-        a = argv[i]
-        if a == "--network":
-            opts["network"], step = value(i)
-        elif a.startswith("--network="):
-            opts["network"], step = a[len("--network="):], 1
-        elif a == "--allow-read":
-            v, step = value(i)
-            opts["extra_read"].append(v)
-        elif a.startswith("--allow-read="):
-            opts["extra_read"].append(a[len("--allow-read="):])
-            step = 1
-        elif a == "--allow-write":
-            v, step = value(i)
-            opts["extra_write"].append(v)
-        elif a.startswith("--allow-write="):
-            opts["extra_write"].append(a[len("--allow-write="):])
-            step = 1
-        elif a == "--why":
-            opts["why"], step = True, 1
-        elif a == "--print-profile":
-            opts["print_profile"], step = True, 1
-        elif a in ("-h", "--help"):
-            sys.stdout.write(USAGE.format(
-                prog=PROG,
-                deny_read=os.path.join(config_dir(), "deny-read"),
-                allow_write=os.path.join(config_dir(), "allow-write")))
+        arg, step = argv[i], 1
+        name, eq, inline = arg.partition("=")
+        if name in ("--network", "--allow-read", "--allow-write"):
+            # Both `--flag=VALUE` and `--flag VALUE`. A trailing `--flag` with
+            # nothing after it yields "", which the checks below reject.
+            if eq:
+                value = inline
+            else:
+                value, step = (argv[i + 1] if i + 1 < len(argv) else ""), 2
+            if name == "--network":
+                opts.network = value
+            elif name == "--allow-read":
+                opts.allow_read.append(value)
+            else:
+                opts.allow_write.append(value)
+        elif arg == "--why":
+            opts.why = True
+        elif arg == "--print-profile":
+            opts.print_profile = True
+        elif arg in ("-h", "--help"):
+            sys.stdout.write(usage())
             sys.exit(0)
-        elif a == "--":
+        elif arg == "--":
             i += 1
             break
-        elif a.startswith("-"):
-            die("unknown option ‘%s’ (see --help)." % a)
+        elif arg.startswith("-"):
+            die(f"unknown option ‘{arg}’ (see --help).")
         else:
             break
         i += step
-
     return opts, argv[i:]
 
-
-def config_dir():
-    xdg = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home(), ".config")
-    return os.path.join(xdg, "devbox")
-
-
-def read_config(name, plain, reversed_):
-    """One path per line; blank lines and lines starting with '#' ignored; a
-    leading '!' reverses the default sense of the file, so a deny-read file can
-    re-allow and an allow-write file can subtract. Returns (action, path) pairs
-    in file order. A missing file is not an error.
-
-    Only whole-line comments: a '#' is legal in a path, and silently truncating
-    someone's allowlist at one would be the wrong kind of surprise."""
-    rules = []
-    try:
-        with open(os.path.join(config_dir(), name)) as f:
-            lines = f.read().splitlines()
-    except FileNotFoundError:
-        return rules
-    except OSError as e:
-        die("cannot read %s: %s" % (os.path.join(config_dir(), name), e))
-    for line in lines:
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("!"):
-            rules.append((reversed_, line[1:].strip()))
-        else:
-            rules.append((plain, line))
-    return rules
-
-
-def check_allow(flag, paths):
-    """Vet the paths you asked for up front. An unresolvable allowlist entry
-    would otherwise be dropped and reappear later as a mysterious denial."""
+def check_flag_paths(flag: str, paths: list[str]) -> None:
+    """Vet the paths you asked for up front. An unresolvable one would
+    otherwise be dropped and reappear later as a mysterious denial."""
     for p in paths:
         if not p:
-            die("%s needs a path." % flag)
+            die(f"{flag} needs a path.")
         try:
             resolve(p)
         except ResolveError as e:
             die(e)
 
+def read_config(name: str, action: str) -> list[Rule]:
+    """One path per line, in file order; blank lines and lines starting with
+    '#' ignored; a leading '!' reverses the file's sense, so a deny-read file
+    can re-allow and an allow-write file can subtract. A missing file is not an
+    error.
+
+    Only whole-line comments: a '#' is legal in a path, and silently truncating
+    someone's allowlist at one would be the wrong kind of surprise."""
+    path = os.path.join(config_dir(), name)
+    reversed_ = "allow" if action == "deny" else "deny"
+    try:
+        with open(path) as f:
+            lines = f.read().splitlines()
+    except FileNotFoundError:
+        return []
+    except OSError as e:
+        die(f"cannot read {path}: {e}")
+    rules = []
+    for line in (l.strip() for l in lines):
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("!"):
+            rules.append((reversed_, line[1:].strip()))
+        else:
+            rules.append((action, line))
+    return rules
 
 # ---------- POLICY ----------
 # Reads are allowed by default and taken away by name; writes are denied by
 # default and given back by name. The asymmetry is deliberate. "Files my dev
 # environment reads" is long, personal and open-ended, so enumerating it
 # produces a sandbox that breaks constantly and stops being used; "files that
-# are secrets" is short and close to universal. Writes are the opposite:
-# almost nothing legitimately writes outside the repo and its caches, so
-# enumerating those costs little and catches a lot.
+# are secrets" is short and close to universal. Writes are the opposite: almost
+# nothing legitimately writes outside the repo and its caches, so enumerating
+# those costs little and catches a lot.
 #
 # The cost of this shape is that a secret somewhere nobody listed stays
 # readable. With the network off by default that is staged exfiltration rather
@@ -243,8 +241,8 @@ DENY_READ_HOME = [
 
 # ~/Library is denied wholesale: it is the highest secret density on the
 # machine (Cookies alone are session tokens for everything you are logged in
-# to) and the least enumerable. The dev-relevant subtrees are given back
-# below -- an allowlist inside a denylist, worth the complication just here.
+# to) and the least enumerable. The dev-relevant subtrees are given back here
+# -- an allowlist inside a denylist, worth the complication just this once.
 LIBRARY_ALLOW = [
     "Library/Developer",   # Xcode: toolchains, SDKs, DerivedData
     "Library/Caches",      # Homebrew, pip, go-build, SwiftPM, CocoaPods
@@ -253,6 +251,7 @@ LIBRARY_ALLOW = [
     "Library/Python",
     "Library/pnpm",
 ]
+
 # ...except the parts of Caches that are somebody's browsing history.
 LIBRARY_REDENY = [
     "Library/Caches/com.apple.Safari",
@@ -265,16 +264,6 @@ DENY_READ_ABS = [
     "/Volumes",                 # a mounted Time Machine disk is a copy of $HOME
     "/private/var/db/dslocal",  # local account password hashes
 ]
-
-
-def default_write():
-    """Scratch space. $TMPDIR is the per-user directory under
-    /private/var/folders; the sibling C/ holds per-user caches that
-    unsandboxed processes trust, so the tree as a whole is not included.
-    /tmp and /var/tmp are world-writable already."""
-    tmpdir = os.environ.get("TMPDIR") or "/private/var/folders"
-    return [tmpdir, "/private/tmp", "/private/var/tmp"]
-
 
 # The character devices everything expects to be able to write to. Not
 # subpaths, so this is a fixed stanza rather than a rule.
@@ -289,77 +278,77 @@ DEVICE_WRITES = '''(allow file-write*
        (subpath "/dev/fd")
        (regex #"^/dev/ttys[0-9]+$"))'''
 
+def scratch_dirs() -> list[str]:
+    """$TMPDIR is the per-user directory under /private/var/folders; the
+    sibling C/ holds per-user caches that unsandboxed processes trust, so the
+    tree as a whole is not included. /tmp and /var/tmp are world-writable
+    already."""
+    tmpdir = os.environ.get("TMPDIR") or "/private/var/folders"
+    return [tmpdir, "/private/tmp", "/private/var/tmp"]
 
-def vet(path, missing_ok=False):
-    """Resolve and check a rule's path. Raises ResolveError if it names
-    something that isn't there: a default naming a tool you haven't installed
-    is normal, not an error."""
-    r = resolve(path, missing_ok=missing_ok)
-    reject_unquotable(r)
-    # (subpath "/") as an allow would cancel every deny below it, and as a
-    # deny would shut the machine. Neither is ever meant.
-    if r == "/":
-        die("‘/’ is not a usable rule: name a directory under it.")
-    return r
-
-
-def stanzas(rules, op):
-    """Render (action, path) pairs as SBPL, one stanza per run of like
-    actions. The order is the meaning: SBPL is last-match-wins, so a later
-    rule overrides an earlier one and reordering these changes the policy."""
-    out, kind, pending = [], None, []
-
-    def flush():
-        if pending:
-            body = "\n".join('       (subpath "%s")' % q for q in pending)
-            out.append("(%s %s\n%s)" % (kind, op, body))
-
-    for action, path in rules:
-        try:
-            # A deny is emitted whether or not its target exists; an allow
-            # for a path that never appears costs nothing, so it is dropped.
-            r = vet(path, missing_ok=(action == "deny"))
-        except ResolveError as e:
-            if e.missing and action == "allow":
-                continue
-            die("%s (%s rule)" % (e, action))
-        if action != kind:
-            flush()
-            kind, pending = action, []
-        pending.append(r)
-    flush()
-    return "\n".join(out)
-
-
-def read_ruleset(cwd, opts):
+def read_ruleset(cwd: str, opts: Options) -> list[Rule]:
     h = home()
-    rules = [("deny", "/Users"), ("allow", h)]   # other users' homes stay shut
+    rules: list[Rule] = [("deny", "/Users"), ("allow", h)]  # other homes shut
     rules += [("deny", p) for p in DENY_READ_ABS]
     rules += [("deny", os.path.join(h, p)) for p in DENY_READ_HOME]
-    rules.append(("deny", os.path.join(h, "Library")))
+    rules += [("deny", os.path.join(h, "Library"))]
     rules += [("allow", os.path.join(h, p)) for p in LIBRARY_ALLOW]
     rules += [("deny", os.path.join(h, p)) for p in LIBRARY_REDENY]
     # Which paths are protected is itself a hint worth not handing over.
-    rules.append(("deny", config_dir()))
-    rules += read_config("deny-read", "deny", "allow")
-    rules += [("allow", p) for p in opts["extra_read"]]
+    rules += [("deny", config_dir())]
+    rules += read_config("deny-read", "deny")
+    rules += [("allow", p) for p in opts.allow_read]
     # Last, so the repo can always read itself whatever else matched.
-    rules.append(("allow", cwd))
+    rules += [("allow", cwd)]
     return rules
 
-
-def write_ruleset(cwd, opts):
-    rules = [("allow", cwd)] + [("allow", p) for p in default_write()]
+def write_ruleset(cwd: str, opts: Options) -> list[Rule]:
+    rules: list[Rule] = [("allow", cwd)]
+    rules += [("allow", p) for p in scratch_dirs()]
     # Repo-supplied code that can edit these gets to run commands later,
     # outside the sandbox, the next time you touch the repo with git:
     # core.fsmonitor, core.sshCommand and diff.*.textconv all execute.
     rules += [("deny", os.path.join(cwd, ".git/hooks")),
               ("deny", os.path.join(cwd, ".git/config"))]
     # After the .git denies, so naming one of them in the config reverses it.
-    rules += read_config("allow-write", "allow", "deny")
-    rules += [("allow", p) for p in opts["extra_write"]]
+    rules += read_config("allow-write", "allow")
+    rules += [("allow", p) for p in opts.allow_write]
     return rules
 
+def stanzas(rules: list[Rule], op: str) -> str:
+    """Render rules as SBPL, one stanza per run of like actions. The order is
+    the meaning: SBPL is last-match-wins, so a later rule overrides an earlier
+    one and reordering these changes the policy."""
+    resolved = []
+    for action, path in rules:
+        try:
+            # A deny is emitted whether or not its target exists; an allow for
+            # a path that never appears costs nothing, so it is dropped.
+            resolved.append((action, vet(path, missing_ok=(action == "deny"))))
+        except ResolveError as e:
+            if e.missing and action == "allow":
+                continue
+            die(f"{e} ({action} rule)")
+    out = []
+    for action, group in itertools.groupby(resolved, key=lambda r: r[0]):
+        body = "\n".join(f'       (subpath "{p}")' for _, p in group)
+        out.append(f"({action} {op}\n{body})")
+    return "\n".join(out)
+
+def refuse_denied_cwd(cwd: str, reads: list[Rule]) -> None:
+    """The final (allow file-read* (subpath cwd)) would override any deny the
+    working directory happens to fall under, so refuse rather than quietly undo
+    one: `cd ~/.ssh && devbox` is a mistake, not a request."""
+    for action, path in reads:
+        if action != "deny":
+            continue
+        try:
+            d = vet(path, missing_ok=True)
+        except ResolveError:
+            continue
+        if cwd == d or cwd.startswith(d + "/"):
+            die(f"refusing to run in ‘{cwd}’: it is inside ‘{d}’, which is on "
+                "the read denylist.")
 
 PROFILE = '''(version 1)
 (allow default)
@@ -387,51 +376,29 @@ NO_NETWORK = '''
        (subpath "/private/tmp")
        (subpath "/private/var/folders"))'''
 
-
-def build_profile(cwd, opts):
+def build_profile(cwd: str, opts: Options) -> str:
     reads = read_ruleset(cwd, opts)
-    writes = write_ruleset(cwd, opts)
-
-    # The final (allow file-read* (subpath cwd)) would override any deny the
-    # working directory happens to fall under, so refuse rather than quietly
-    # undo one: `cd ~/.ssh && devbox` is a mistake, not a request.
-    for action, path in reads:
-        if action != "deny":
-            continue
-        try:
-            d = vet(path, missing_ok=True)
-        except ResolveError:
-            continue
-        if cwd == d or cwd.startswith(d + "/"):
-            die("refusing to run in ‘%s’: it is inside ‘%s’, "
-                "which is on the read denylist." % (cwd, d))
-
-    write_rules = stanzas(writes, "file-write*")
+    refuse_denied_cwd(cwd, reads)
+    write_rules = stanzas(write_ruleset(cwd, opts), "file-write*")
     # A bare `(allow file-write*)` -- what an empty stanza renders as -- would
     # cancel the deny above it and make the whole filesystem writable.
     if "(allow file-write*\n" not in write_rules:
         die("internal error: no writable path; the profile would be unsafe.")
-
-    profile = PROFILE.format(
-        write_rules=write_rules,
-        device_writes=DEVICE_WRITES,
-        read_rules=stanzas(reads, "file-read*"),
-    )
-    if opts["network"] == "no":
-        profile += NO_NETWORK
-    return profile
-
+    profile = PROFILE.format(write_rules=write_rules,
+                             device_writes=DEVICE_WRITES,
+                             read_rules=stanzas(reads, "file-read*"))
+    return profile + NO_NETWORK if opts.network == "no" else profile
 
 # ---------- RUNNING ----------
 
-def run_with_why(profile, cmd):
+def run_with_why(profile: str, cmd: list[str]) -> int:
     """--why: run rather than exec, so that the denials can be collected
     afterwards. `log show` after the fact rather than `log stream` alongside,
     because stream takes a moment to attach and would miss the denials at
     startup, which are the ones you most want to see."""
     started = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     status = subprocess.call([SANDBOX_EXEC, "-p", profile] + cmd)
-    print("%s: sandbox denials since %s:" % (PROG, started), file=sys.stderr)
+    print(f"{PROG}: sandbox denials since {started}:", file=sys.stderr)
     # A denial is logged as e.g.
     #   Sandbox: bash(123) deny(1) file-read-data /Users/me/.ssh/id_ed25519
     # The predicate is the part most likely to need adjusting across macOS
@@ -442,61 +409,53 @@ def run_with_why(profile, cmd):
          "--predicate", 'eventMessage CONTAINS "deny("'],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
     ).stdout
-    lines = [l for l in out.splitlines() if not l.startswith("Timestamp")]
-    if lines:
-        print("\n".join(lines), file=sys.stderr)
-    else:
-        print("%s: none logged." % PROG, file=sys.stderr)
+    denials = [line for line in out.splitlines()
+               if not line.startswith("Timestamp")]
+    print("\n".join(denials) if denials else f"{PROG}: none logged.",
+          file=sys.stderr)
     return status
 
+def refuse_unreasonable_cwd(cwd: str) -> None:
+    """The whole point is that one directory is writable, so a home directory
+    or the root of the filesystem is not a useful choice: cd to a project."""
+    under_users = cwd == "/Users" or cwd.startswith("/Users/")
+    # "/Users/me/project" has three slashes; "/Users/me" and "/Users" fewer.
+    if cwd == "/" or (under_users and cwd.rstrip("/").count("/") < 3):
+        die(f"refusing to run with ‘{cwd}’ writable: cd to a project "
+            "directory, not a home directory or the root of the filesystem.")
 
-def main():
-    # ---------- PLATFORM ----------
+def main() -> int:
     # sandbox-exec is macOS-only.
     if os.uname().sysname != "Darwin":
-        die("macOS only -- sandbox-exec doesn't exist on %s." % os.uname().sysname)
+        die(f"macOS only -- sandbox-exec doesn't exist on {os.uname().sysname}.")
     if not os.access(SANDBOX_EXEC, os.X_OK):
-        die("%s is missing; nothing to sandbox with." % SANDBOX_EXEC)
+        die(f"{SANDBOX_EXEC} is missing; nothing to sandbox with.")
 
     cwd = os.getcwd()
     opts, rest = parse_args(sys.argv[1:])
+    if opts.network not in ("yes", "no"):
+        die(f"--network takes ‘yes’ or ‘no’, not ‘{opts.network}’.")
+    check_flag_paths("--allow-read", opts.allow_read)
+    check_flag_paths("--allow-write", opts.allow_write)
+    cmd = rest or [os.environ.get("SHELL") or "/bin/bash"]
 
-    if opts["network"] not in ("yes", "no"):
-        die("--network takes ‘yes’ or ‘no’, not ‘%s’."
-            % opts["network"])
-
-    check_allow("--allow-read", opts["extra_read"])
-    check_allow("--allow-write", opts["extra_write"])
-
-    cmd = rest if rest else [os.environ.get("SHELL") or "/bin/bash"]
-
-    # ---------- WORKING DIRECTORY MUST BE REASONABLE ----------
-    # The whole point is that one directory is writable, so a home directory or
-    # the root of the filesystem is not a useful choice: mount a project.
-    parts = cwd.split("/")  # "/Users/me/x" -> ['', 'Users', 'me', 'x']
-    inside_a_home = len(parts) > 3 and parts[1] == "Users"
-    if not inside_a_home and (cwd == "/" or cwd == "/Users" or cwd.startswith("/Users/")):
-        die("refusing to run with ‘%s’ writable: cd to a project "
-            "directory, not a home directory or the root of the filesystem." % cwd)
-    reject_unquotable(cwd)
-
+    refuse_unreasonable_cwd(cwd)
+    vet(cwd)  # the profile will quote it; fail now if it can't be quoted
     profile = build_profile(cwd, opts)
 
-    if opts["print_profile"]:
+    if opts.print_profile:
         print(profile)
         return 0
 
     # Marks the shell as sandboxed for anyone who wants to say so in a prompt.
     os.environ["DEVBOX"] = "1"
-
     if sys.stderr.isatty():
-        print("%s: ‘%s’ writable, network %s, credentials unreadable."
-              % (PROG, cwd, opts["network"]), file=sys.stderr)
+        print(f"{PROG}: ‘{cwd}’ writable, network {opts.network}, "
+              "credentials unreadable.", file=sys.stderr)
 
-    if not opts["why"]:
+    if not opts.why:
         os.execv(SANDBOX_EXEC, [SANDBOX_EXEC, "-p", profile] + cmd)
     return run_with_why(profile, cmd)
-
 
 if __name__ == "__main__":
     sys.exit(main())
