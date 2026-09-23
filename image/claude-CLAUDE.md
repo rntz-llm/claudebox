@@ -1,6 +1,6 @@
-# REQUESTS FROM USER
+# DIRECTIVES FROM USER
 
-Be brief and to the point everywhere: chat, comments, code, .md files, PRs. Omit unnecessary comments. Exception: comments that explain architecture or tricky design decisions in larger projects can be long. Consider putting these into .md files, however.
+Be brief. No, even briefer than that. Cut everything you would say in half first; prioritize ruthlessly. If I need detail I will ask. I am repeating this because you have repeatedly ignored it. Stop ignoring it. Remind yourself of it as necessary. Be concise everywhere: chat, comments, code, .md files, PRs. Omit unnecessary comments. For god's sake, STOP TALKING SO MUCH.
 
 If a task seems impossible, halt and explain.
 
