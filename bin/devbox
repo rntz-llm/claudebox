@@ -39,9 +39,7 @@ EOF
 }
 
 # ---------- PLATFORM ----------
-# sandbox-exec is macOS-only, and deprecated-but-working. There is no
-# equivalent to fall back to, so bail rather than silently running unsandboxed:
-# a sandbox you think you have and don't is worse than none.
+# sandbox-exec is macOS-only.
 if [[ "$(uname -s)" != Darwin ]]; then
     echo "$prog: macOS only -- sandbox-exec doesn't exist on $(uname -s)." >&2
     exit 1
@@ -50,6 +48,7 @@ if [[ ! -x /usr/bin/sandbox-exec ]]; then
     echo "$prog: /usr/bin/sandbox-exec is missing; nothing to sandbox with." >&2
     exit 1
 fi
+
 
 # ---------- PATHS ----------
 
@@ -90,6 +89,7 @@ reject_unquotable() {
             ;;
     esac
 }
+
 
 # ---------- ARGUMENTS ----------
 
