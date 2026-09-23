@@ -81,7 +81,6 @@ command need no --:  {prog} cargo test --release
 
 
 # -------------------- PATHS --------------------
-
 def resolve(p: str) -> str:
     """Absolute physical path, with every symlink resolved, because Seatbelt
     matches the path an operation resolves to rather than the one it was handed.
