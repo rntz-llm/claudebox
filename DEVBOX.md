@@ -13,8 +13,8 @@ cd ~/src/someones-repo
 devbox                            # a shell, sandboxed
 devbox cargo test                 # one command
 devbox --network=yes npm ci       # when a step genuinely needs the network
-devbox --allow-write ~/.npm       # widen the write policy for one run
-devbox --deny-read ./vendor       # ...or narrow either one
+devbox --allow-write ~/.npm       # widen the policy for one run
+devbox --deny-read ./vendor       # ...or narrow it
 devbox --why cargo build          # ...and find out what to widen it with
 devbox --print-profile            # see exactly what the profile says
 ```
@@ -108,35 +108,51 @@ anyway. Not worth a sandbox that breaks every autumn.
 
 ## Configuring it
 
-Two files, one path per line. Blank lines and lines starting with `#` are
-ignored; `~` is expanded; a leading `!` reverses the file's sense, so a
-`deny-read` entry can re-allow and an `allow-write` entry can subtract.
+One file, one directive per line, `#` for a comment:
 
 ```
-~/.config/devbox/deny-read      # paths to hide, in addition to the defaults
-~/.config/devbox/allow-write    # paths to make writable, beyond the repo
+# ~/.config/devbox/rules
+deny-read   ~/work/customer-data
+allow-write ~/.cargo/registry
+allow-read  ~/.claude            # I want this one readable after all
 ```
 
-```sh
-# ~/.config/devbox/deny-read
-~/work/customer-data
-!~/.claude                      # I want this one readable after all
+The four directives are the four flags: `--allow-read`, `--deny-read`,
+`--allow-write`, `--deny-write`, all repeatable and all taking a path.
 
-# ~/.config/devbox/allow-write
-~/.cargo/registry
-!~/src/scratch/.git/config      # let git write config in this one repo
-```
+**Order is the policy.** Rules apply in sequence and the last one matching a
+path wins, across reads and writes alike, exactly as SBPL resolves them.
+`--deny-read ~/x --allow-read ~/x/pub` means what it looks like; so does the
+reverse. Precedence runs lowest to highest: the built-in defaults, then the
+config file, then the command line.
 
-`--allow-read`, `--deny-read`, `--allow-write` and `--deny-write` do the same
-for a single run. All of them are repeatable, and they apply in the order you
-write them, so `--deny-read ~/x --allow-read ~/x/pub` means what it looks like.
+**Two directives imply a second.** `allow-write` also permits reads, and
+`deny-read` also forbids writes, at the same position in the sequence:
 
-Precedence runs lowest to highest: the built-in defaults, then the working
-directory, then the config files, then the command line. The working directory
-is re-allowed ahead of the last two so a default can't shut your repo — but
-`--deny-read ./secrets` still takes effect, because a flag that silently did
-nothing would be the worse failure. `cd ~/.ssh && devbox` is refused outright
-rather than quietly re-allowed.
+| you write | you also get |
+|---|---|
+| `allow-write PATH` | `allow-read PATH` |
+| `deny-read PATH` | `deny-write PATH` |
+| `allow-read PATH` | — |
+| `deny-write PATH` | — |
+
+So a path is never writable without being readable. That isn't a convenience;
+writable-but-unreadable is a state that doesn't mean anything. It breaks every
+tool that opens a file `O_RDWR`, and it doesn't even keep the secret, because
+`mv ~/.aws/credentials ./stolen` needs write permission at both ends and read
+permission at neither. Better for the profile not to claim it.
+
+The implication is one-directional: `deny-write` leaves reads alone, which is
+what lets `.git/config` stay readable while being unwritable, and `allow-read`
+grants no writes, which is what keeps `~/Library/Caches` readable but not
+writable until you ask.
+
+One consequence worth knowing: a broad `--allow-write` is also a broad
+`--allow-read`. `--allow-write ~` reopens every credential deny.
+
+The working directory is allowed early, ahead of the credential denies, so
+`cd ~/.ssh && devbox` leaves `~/.ssh` shut rather than quietly reopening it —
+and devbox says so rather than handing you a sandbox where nothing works.
 
 There is deliberately no per-project config file: the repo is the thing being
 contained, so it does not get to name its own exceptions.

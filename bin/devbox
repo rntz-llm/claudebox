@@ -20,8 +20,11 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import NoReturn
 
-# An ordered (action, path) pair, where action is "allow" or "deny".
-Rule = tuple[str, str]
+# A policy directive: action is "allow" or "deny", op is "read" or "write".
+# Order is the meaning -- SBPL is last-match-wins -- so these travel as one
+# ordered stream and are split by op only at the moment of rendering.
+Directive = tuple[str, str, str]  # (action, op, path)
+Rule = tuple[str, str]            # (action, path), within a single op
 
 def home() -> str:
     h = os.environ.get("HOME")
@@ -33,6 +36,7 @@ SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 LOG = "/usr/bin/log"
 XDG_CONFIG_DIR = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home(), ".config")
 CONFIG_DIR = os.path.join(XDG_CONFIG_DIR, "devbox")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "rules")
 
 def die(msg) -> NoReturn:
     print(f"{PROG}: {msg}", file=sys.stderr)
@@ -57,20 +61,21 @@ options:
   -h, --help           this
 
 The --allow/--deny options are repeatable and apply in the order you give
-them; the last one matching a path wins. Defaults are extended by two files,
-one path per line, '#' for a comment and a leading '!' to reverse a default:
-  {deny_read}
-  {allow_write}
+them, across reads and writes alike; the last one matching a path wins.
+--allow-write also permits reads, and --deny-read also forbids writes, so a
+path is never writable without being readable.
 
-Precedence, lowest first: the built-in defaults, the working directory, the
-config files, then the command line.
+The same directives can be listed one per line, '#' for a comment, in
+  {config_file}
+
+Precedence, lowest first: the built-in defaults, then that file, then the
+command line.
 
 Option parsing stops at the first non-option argument, so flags meant for the
 command need no --:  {prog} cargo test --release
 """.format(
     prog=PROG,
-    deny_read=os.path.join(CONFIG_DIR, "deny-read"),
-    allow_write=os.path.join(CONFIG_DIR, "allow-write"),
+    config_file=CONFIG_FILE,
 )
 
 
@@ -117,10 +122,10 @@ def vet(path: str) -> str:
 @dataclass
 class Options:
     network: str = "no"
-    # Kept as rules rather than two allow-lists so that --allow-read and
-    # --deny-read keep their order relative to each other on the command line.
-    read_rules: list[Rule] = field(default_factory=list)
-    write_rules: list[Rule] = field(default_factory=list)
+    # One ordered list, not one per op, so that every --allow/--deny keeps its
+    # position relative to all the others: `--allow-write X --deny-read X` and
+    # the reverse mean different things.
+    directives: list[Directive] = field(default_factory=list)
     print_profile: bool = False
     why: bool = False
 
@@ -148,10 +153,8 @@ def parse_args(argv: list[str]) -> tuple[Options, list[str]]:
             if name == "--network":
                 opts.network = value
             else:
-                action, _, kind = name[2:].partition("-")  # --allow-read
-                rules = (opts.read_rules if kind == "read"
-                         else opts.write_rules)
-                rules.append((action, value))
+                action, _, op = name[2:].partition("-")  # --allow-read
+                opts.directives.append((action, op, value))
         elif arg == "--why":
             opts.why = True
         elif arg == "--print-profile":
@@ -169,13 +172,13 @@ def parse_args(argv: list[str]) -> tuple[Options, list[str]]:
         i += step
     return opts, argv[i:]
 
-def check_flag_rules(rules: list[Rule], kind: str) -> None:
+def check_flag_rules(directives: list[Directive]) -> None:
     """Vet the paths you asked for up front. An unresolvable one would
     otherwise be dropped and reappear later as a mysterious denial. Stricter
     than the config files, which may name tools you haven't installed: a path
     you just typed should exist, or at least its parent should."""
-    for action, p in rules:
-        flag = f"--{action}-{kind}"
+    for action, op, p in directives:
+        flag = f"--{action}-{op}"
         if not p:
             die(f"{flag} needs a path.")
         try:
@@ -190,32 +193,36 @@ def check_flag_rules(rules: list[Rule], kind: str) -> None:
         if not os.path.isdir(head):
             die(f"no such directory: {head} (from {flag})")
 
-def read_config(name: str, action: str) -> list[Rule]:
-    """One path per line, in file order; blank lines and lines starting with
-    '#' ignored; a leading '!' reverses the file's sense, so a deny-read file
-    can re-allow and an allow-write file can subtract. A missing file is not an
-    error.
+DIRECTIVES = ("allow-read", "deny-read", "allow-write", "deny-write")
 
-    Only whole-line comments: a '#' is legal in a path, and silently truncating
-    someone's allowlist at one would be the wrong kind of surprise."""
-    path = os.path.join(CONFIG_DIR, name)
-    reversed_ = "allow" if action == "deny" else "deny"
+def read_config() -> list[Directive]:
+    """`DIRECTIVE PATH` per line, in file order, where DIRECTIVE is one of the
+    four --allow/--deny flag names. Blank lines and lines starting with '#'
+    are ignored; a missing file is not an error.
+
+    Only whole-line comments: a '#' is legal in a path, and silently
+    truncating someone's rule at one would be the wrong kind of surprise."""
     try:
-        with open(path) as f:
+        with open(CONFIG_FILE) as f:
             lines = f.read().splitlines()
     except FileNotFoundError:
         return []
     except OSError as e:
-        die(f"cannot read {path}: {e}")
-    rules = []
-    for line in (l.strip() for l in lines):
+        die(f"cannot read {CONFIG_FILE}: {e}")
+    directives = []
+    for n, line in enumerate(lines, 1):
+        line = line.strip()
         if not line or line.startswith("#"):
             continue
-        if line.startswith("!"):
-            rules.append((reversed_, line[1:].strip()))
-        else:
-            rules.append((action, line))
-    return rules
+        word, _, path = line.partition(" ")
+        if word not in DIRECTIVES:
+            die(f"{CONFIG_FILE}:{n}: expected one of "
+                f"{', '.join(DIRECTIVES)}, got ‘{word}’")
+        if not path.strip():
+            die(f"{CONFIG_FILE}:{n}: {word} needs a path")
+        action, _, op = word.partition("-")
+        directives.append((action, op, path.strip()))
+    return directives
 
 
 # -------------------- POLICY --------------------
@@ -287,39 +294,57 @@ def scratch_dirs() -> list[str]:
     tmpdir = os.environ.get("TMPDIR") or "/private/var/folders"
     return [tmpdir, "/private/tmp", "/private/var/tmp"]
 
-def default_read_rules() -> list[Rule]:
-    """The built-in read policy: the lowest precedence layer."""
+def expand(d: Directive) -> list[Directive]:
+    """A directive and whatever it implies, at the same position.
+
+    Writable-but-not-readable is not a state worth being able to express: it
+    breaks every tool that opens O_RDWR, and it doesn't even buy secrecy,
+    because `mv ~/.aws/creds ./stolen` needs write on both ends and read on
+    neither. So allow-write carries allow-read, and -- its contrapositive --
+    deny-read carries deny-write. Together they keep `writable implies
+    readable` true at every point in the stream. The other two directives
+    imply nothing: .git/config must stay readable while being unwritable."""
+    action, op, path = d
+    if (action, op) == ("allow", "write"):
+        return [d, ("allow", "read", path)]
+    if (action, op) == ("deny", "read"):
+        return [d, ("deny", "write", path)]
+    return [d]
+
+def default_directives(cwd: str) -> list[Directive]:
+    """The built-in policy, lowest precedence.
+
+    The working directory is allowed early, ahead of the credential denies,
+    so that those override it: `cd ~/.ssh && devbox` leaves ~/.ssh shut
+    rather than quietly reopening it."""
     h = home()
-    rules: list[Rule] = [("deny", "/Users"), ("allow", h)]  # other homes shut
-    rules += [("deny", p) for p in DENY_READ_ABS]
-    rules += [("deny", os.path.join(h, p)) for p in DENY_READ_HOME]
-    rules += [("deny", os.path.join(h, "Library"))]
-    rules += [("allow", os.path.join(h, p)) for p in LIBRARY_ALLOW]
-    rules += [("deny", os.path.join(h, p)) for p in LIBRARY_REDENY]
+    ds: list[Directive] = [("deny", "read", "/Users"),   # other homes stay shut
+                           ("allow", "read", h),
+                           ("allow", "write", cwd)]
+    ds += [("allow", "write", p) for p in scratch_dirs()]
+    ds += [("deny", "read", p) for p in DENY_READ_ABS]
+    ds += [("deny", "read", os.path.join(h, p)) for p in DENY_READ_HOME]
+    ds += [("deny", "read", os.path.join(h, "Library"))]
+    ds += [("allow", "read", os.path.join(h, p)) for p in LIBRARY_ALLOW]
+    ds += [("deny", "read", os.path.join(h, p)) for p in LIBRARY_REDENY]
     # Which paths are protected is itself a hint worth not handing over.
-    rules += [("deny", CONFIG_DIR)]
-    return rules
-
-def read_ruleset(cwd: str, opts: Options) -> list[Rule]:
-    # Defaults, then the repo, then your config, then your command line. The
-    # working directory is re-allowed ahead of the last two so that a default
-    # can't shut the repo -- but `--deny-read ./secrets` still bites, because
-    # a flag that silently did nothing would be the worse failure.
-    return (default_read_rules() + [("allow", cwd)]
-            + read_config("deny-read", "deny") + opts.read_rules)
-
-def write_ruleset(cwd: str, opts: Options) -> list[Rule]:
-    rules: list[Rule] = [("allow", cwd)]
-    rules += [("allow", p) for p in scratch_dirs()]
+    ds += [("deny", "read", CONFIG_DIR)]
     # Repo-supplied code that can edit these gets to run commands later,
     # outside the sandbox, the next time you touch the repo with git:
-    # core.fsmonitor, core.sshCommand and diff.*.textconv all execute.
-    rules += [("deny", os.path.join(cwd, ".git/hooks")),
-              ("deny", os.path.join(cwd, ".git/config"))]
-    # After the .git denies, so naming one of them in the config reverses it.
-    rules += read_config("allow-write", "allow")
-    rules += opts.write_rules
-    return rules
+    # core.fsmonitor, core.sshCommand and diff.*.textconv all execute. Denying
+    # the write only: git has to be able to read its own config.
+    ds += [("deny", "write", os.path.join(cwd, ".git/hooks")),
+           ("deny", "write", os.path.join(cwd, ".git/config"))]
+    return ds
+
+def ruleset(cwd: str, opts: Options) -> list[Directive]:
+    """The whole policy as one ordered stream: defaults, then your config
+    file, then your command line, each able to override what came before."""
+    ds = default_directives(cwd) + read_config() + opts.directives
+    return [e for d in ds for e in expand(d)]
+
+def rules_for(op: str, directives: list[Directive]) -> list[Rule]:
+    return [(action, path) for action, o, path in directives if o == op]
 
 def stanzas(rules: list[Rule], op: str) -> str:
     """Render rules as SBPL, one stanza per run of like actions. The order is
@@ -340,17 +365,20 @@ def stanzas(rules: list[Rule], op: str) -> str:
     return "\n".join(out)
 
 def refuse_denied_cwd(cwd: str) -> None:
-    """Re-allowing the working directory would override a built-in deny it
-    happens to sit under, so refuse instead of quietly undoing one:
-    `cd ~/.ssh && devbox` is a mistake, not a request. Only the defaults are
-    policed; denying your own repo from the config file or the command line is
-    a thing you are allowed to mean.
+    """A working directory the defaults deny reads of yields a sandbox where
+    nothing works, since the repo can neither be read nor -- deny-read
+    implying deny-write -- written. That is safe but baffling, so say why.
+    Advisory only: the profile would be correct either way.
+
+    Only the defaults are policed; denying your own repo from the config file
+    or the command line is a thing you are allowed to mean.
 
     Last match wins, exactly as SBPL resolves it. Scanning for any matching
     deny is wrong: every path under $HOME matches the `/Users` deny that the
     `$HOME` allow immediately overrides."""
     verdict = None
-    for action, path in default_read_rules():
+    defaults = [e for d in default_directives(cwd) for e in expand(d)]
+    for action, path in rules_for("read", defaults):
         try:
             d = vet(path)
         except OSError:
@@ -359,7 +387,7 @@ def refuse_denied_cwd(cwd: str) -> None:
             verdict = (action, d)
     if verdict and verdict[0] == "deny":
         die(f"refusing to run in ‘{cwd}’: it is inside ‘{verdict[1]}’, which "
-            "is on the read denylist.")
+            "is on the read denylist, so nothing there would be readable.")
 
 
 PROFILE = '''(version 1)
@@ -390,15 +418,16 @@ NO_NETWORK = '''
 
 def build_profile(cwd: str, opts: Options) -> str:
     refuse_denied_cwd(cwd)
-    reads = read_ruleset(cwd, opts)
-    write_rules = stanzas(write_ruleset(cwd, opts), "file-write*")
+    directives  = ruleset(cwd, opts)
+    read_rules  = stanzas(rules_for("read", directives), "file-read*")
+    write_rules = stanzas(rules_for("write", directives), "file-write*")
     # A bare `(allow file-write*)` -- what an empty stanza renders as -- would
     # cancel the deny above it and make the whole filesystem writable.
     if "(allow file-write*\n" not in write_rules:
         die("internal error: no writable path; the profile would be unsafe.")
     profile = PROFILE.format(write_rules=write_rules,
-                             device_writes=DEVICE_WRITES,
-                             read_rules=stanzas(reads, "file-read*"))
+                             read_rules=read_rules,
+                             device_writes=DEVICE_WRITES)
     return profile + NO_NETWORK if opts.network == "no" else profile
 
 
@@ -448,8 +477,7 @@ def main() -> int:
     opts, rest = parse_args(sys.argv[1:])
     if opts.network not in ("yes", "no"):
         die(f"--network takes ‘yes’ or ‘no’, not ‘{opts.network}’.")
-    check_flag_rules(opts.read_rules, "read")
-    check_flag_rules(opts.write_rules, "write")
+    check_flag_rules(opts.directives)
     cmd = rest or [os.environ.get("SHELL") or "/bin/bash"]
 
     refuse_unreasonable_cwd(cwd)

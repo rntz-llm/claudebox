@@ -5,15 +5,22 @@ m = types.ModuleType("devbox"); m.__dict__["__name__"] = "devbox"
 exec(compile(src, "devbox", "exec"), m.__dict__)
 
 HOME = "/Users/marntzenius"
-# The real macOS default shape, in order.
-RULES = [("deny", "/Users"), ("allow", HOME),
-         ("deny", "/Volumes"), ("deny", "/private/var/db/dslocal"),
-         ("deny", f"{HOME}/.ssh"), ("deny", f"{HOME}/.aws"),
-         ("deny", f"{HOME}/Library"),
-         ("allow", f"{HOME}/Library/Caches"),
-         ("deny", f"{HOME}/Library/Caches/Google"),
-         ("deny", f"{HOME}/.config/devbox")]
-m.default_read_rules = lambda: RULES
+# The real macOS default shape, in order. cwd is allowed early, ahead of the
+# credential denies, so those override it.
+def directives(cwd):
+    return [("deny", "read", "/Users"),
+            ("allow", "read", HOME),
+            ("allow", "write", cwd),
+            ("allow", "write", "/tmp"),
+            ("deny", "read", "/Volumes"),
+            ("deny", "read", "/private/var/db/dslocal"),
+            ("deny", "read", f"{HOME}/.ssh"),
+            ("deny", "read", f"{HOME}/.aws"),
+            ("deny", "read", f"{HOME}/Library"),
+            ("allow", "read", f"{HOME}/Library/Caches"),
+            ("deny", "read", f"{HOME}/Library/Caches/Google"),
+            ("deny", "read", f"{HOME}/.config/devbox")]
+m.default_directives = directives
 m.vet = lambda path: path          # already absolute in the fixture
 def refused(cwd):
     try:
@@ -30,7 +37,12 @@ cases = [
     (f"{HOME}/Library/Preferences",      True,  "under ~/Library"),
     (f"{HOME}/Library/Caches/proj",      False, "re-allowed under ~/Library"),
     (f"{HOME}/Library/Caches/Google/x",  True,  "re-denied under Caches"),
-    ("/Users/someoneelse/x",             True,  "another user's home"),
+    # cwd is allowed ahead of the credential denies, so it punches through
+    # the /Users deny -- the same mechanism that makes /Users/Shared work.
+    # POSIX still gates access, and refuse_unreasonable_cwd() still blocks
+    # targeting a whole home directory.
+    ("/Users/Shared/project",            False, "shared, outside $HOME"),
+    ("/Users/someoneelse/x",             False, "deliberately chosen as cwd"),
     ("/Volumes/Backup/repo",             True,  "a mounted volume"),
     ("/opt/work/repo",                   False, "outside /Users entirely"),
 ]
