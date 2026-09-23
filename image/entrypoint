@@ -1,0 +1,24 @@
+#!/bin/sh
+
+# Seeds $CLAUDE_CONFIG_DIR, which claudebox mounts per project, from the image's
+# defaults. Existing values win; keys new to the image get added.
+
+set -u
+mkdir -p "$CLAUDE_CONFIG_DIR"
+# The umask keeps new files and temp copies private; writing merges back in
+# place keeps existing files' modes. Subshell so the umask doesn't leak into the
+# exec'd command.
+(
+    umask 077
+    src=/etc/claudebox/settings.json
+    dst="$CLAUDE_CONFIG_DIR/settings.json"
+    if [ ! -e "$dst" ]; then
+        cp "$src" "$dst"
+    elif jq -s '.[0] * .[1]' "$src" "$dst" > "$dst.tmp"; then
+        cat "$dst.tmp" > "$dst"
+    else
+        echo "claudebox-entrypoint: couldn't merge defaults into ‘$dst’; leaving it alone." >&2
+    fi
+    rm -f "$dst.tmp"
+)
+exec "$@"

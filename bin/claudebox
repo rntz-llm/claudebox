@@ -1,0 +1,130 @@
+#!/bin/bash
+
+set -euo pipefail
+
+# Resolve the script path through symlinks before taking its directory. Without
+# this, invoking a symlink to this script -- the obvious thing to do once bin/
+# is meant to be on your PATH -- computes the wrong script_dir: the buildbox
+# lookup below misses, and worse, the containment check passes for a workspace
+# that really does hold these scripts. macOS has no portable `readlink -f`.
+script="${BASH_SOURCE[0]}"
+links=0
+while [[ -L "$script" ]]; do
+    if (( ++links > 40 )); then
+        echo "Refusing to run: ‘${BASH_SOURCE[0]}’ is more than 40 symlinks deep; a loop?" >&2
+        exit 1
+    fi
+    target="$(readlink "$script")"
+    case "$target" in
+        /*) script="$target" ;;
+        *)  script="$(cd "$(dirname "$script")" && pwd -P)/$target" ;;
+    esac
+done
+script_dir="$(cd "$(dirname "$script")" && pwd -P)"
+cwd="$(pwd -P)"
+
+# ---------- WORKSPACE (CURRENT) DIRECTORY MUST BE REASONABLE ----------
+# 1. No commas or equals signs (they'd break --mount's option syntax).
+# 2. No home dirs or parents of homedirs.
+# 3. Doesn't contain claudebox's own scripts.
+# 4. Must be owned by current user.
+
+if [[ "$cwd" == *[,=]* ]]; then
+    echo "Refusing to mount ‘${cwd}’ as /workspace: its path contains a comma or equals sign, which --mount cannot express." >&2
+    exit 1
+fi
+
+# Is $1 the same directory as $2, or one of its ancestors?
+is_same_or_ancestor() {
+    local ancestor="${1%/}" path="${2%/}"
+    [[ "$path" == "$ancestor" || "$path" == "$ancestor"/* ]]
+}
+
+if is_same_or_ancestor "$cwd" "$script_dir"; then
+    echo "Refusing to mount ‘${cwd}’ as /workspace: it contains claudebox's own scripts." >&2
+    exit 1
+fi
+
+# On macOS every home directory is /Users/<name>, so anything at or above that
+# level is either a home directory or holds all of them.
+case "$cwd" in
+    /Users/*/*) ;;  # somewhere inside a home directory: fine
+    /|/Users|/Users/*)
+        echo "Refusing to mount ‘${cwd}’ as /workspace: mount a project directory, not a home directory or the root of the filesystem." >&2
+        exit 1
+        ;;
+esac
+
+if [[ ! -O "$cwd" ]]; then
+    echo "Refusing to mount ‘${cwd}’ as /workspace: it is owned by ‘$(stat -f %Su "$cwd")’, not ‘$(id -un)’." >&2
+    exit 1
+fi
+# ---------- END WORKSPACE DIR CHECKS ----------
+
+# Per-project Claude state (memories, transcripts, login), keyed by host path so
+# projects don't share it. claudebox-gc cleans up after moved/deleted projects.
+hash="$(printf %s "$cwd" | shasum -a 256 | cut -c1-12)"
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/claudebox/projects/$(basename "$cwd")-$hash"
+if [[ "$state_dir" == *[,=]* ]]; then
+    echo "Refusing to mount ‘${state_dir}’: its path contains a comma or equals sign, which --mount cannot express." >&2
+    exit 1
+fi
+
+container_options=(
+    --interactive
+    --tty
+    --mount "type=bind,source=$cwd,target=/workspace"
+    --mount "type=bind,source=$state_dir/claude,target=/home/agent/.claude"
+)
+
+# Arguments are passed through untouched, --name included: if you supplied one
+# that's the name, and a name that's already taken is `container run`'s
+# complaint to make, not ours. Only when there's no --name do we pick one from
+# the directory name, suffixed so that concurrent boxes don't collide.
+name_given=no
+for arg in "$@"; do
+    case "$arg" in
+        --name|--name=*) name_given=yes; break ;;
+    esac
+done
+
+if [[ "$name_given" == no ]]; then
+    # Names may become DNS hostnames, so stick to a short [a-z0-9_-] label.
+    base="$(basename "$cwd" | LC_ALL=C tr '[:upper:]' '[:lower:]' \
+        | LC_ALL=C sed -e 's/[^a-z0-9_-]/-/g' -e 's/--*/-/g' \
+        | cut -c1-50 | LC_ALL=C sed -e 's/^[^a-z0-9]*//' -e 's/[^a-z0-9]*$//')"
+    if [[ -z "$base" ]]; then
+        echo "Refusing to run: can't make a container name from ‘$(basename "$cwd")’; pass --name." >&2
+        exit 1
+    fi
+    for candidate in "$base" "$base"-{1..99}; do
+        if ! container inspect "$candidate" >/dev/null 2>&1; then
+            name="$candidate"
+            break
+        fi
+    done
+    if [[ -z "${name:-}" ]]; then
+        echo "Refusing to run: ‘${base}’ through ‘${base}-99’ are all taken; pass --name." >&2
+        exit 1
+    fi
+    echo "Container name: ‘${name}’"
+    container_options+=(--name "$name")
+fi
+
+# Side effects only from here on, so a refusal above leaves nothing behind.
+mkdir -p "$state_dir/claude"
+# Its mtime records the last launch.
+printf '%s\n' "$cwd" > "$state_dir/path"
+
+if container image list | grep -q '^claude\b'; then
+    echo "Image ‘claude’ already built, reusing."
+else
+    # --no-cache because the Dockerfile pins neither node nor rust, and a cached
+    # layer would keep whatever version it first resolved. See
+    # BUILD_CACHING_IS_PROBLEMATIC.md.
+    "$script_dir/buildbox" --no-cache
+fi
+
+# Not echoing b/c "-e GH_TOKEN=..." is common, don't want that PAT displayed.
+#echo container run "${container_options[@]}" "$@" claude
+container run "${container_options[@]}" "$@" claude

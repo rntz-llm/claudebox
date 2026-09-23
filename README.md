@@ -1,6 +1,25 @@
-Some tools for setting up an Apple container to sandbox Claude in a lightweight VM while giving it network access and the ability to install tools it needs.
+Lightweight sandboxing tools for macOS. Made for my own use; may or may not work for you.
+Put `bin/` on `PATH` to use.
 
-`bin/devbox` is the lighter-weight sibling: instead of a VM, it runs a command
-against the current directory under a macOS `sandbox-exec` profile that permits
-writes only inside that directory, denies reads of your credentials and private
-data, and denies the network unless you ask for it. See DEVBOX.md.
+`claudebox` uses Apple containers to sandbox Claude in a Debian VM with network access and
+`sudo` to install tools. The current directory ("project") is mounted as `/workspace`.
+Each project's Claude state (memories, transcripts, login) persists in
+`~/.local/state/claudebox/projects/`, keyed by the project path. `claudebox-gc` lists
+projects and cleans up after ones you've deleted or moved. The first `claudebox` run
+builds the container image; see `Dockerfile`. Use `buildbox` to (re)build the image
+explicitly.
+
+`bin/devbox` is the lighter-weight sibling, meant to contain accidents more than to resist
+attack: instead of a VM, it runs a command under a `sandbox-exec` profile that permits
+writes only inside the current directory and temporary directories, denies reads of some
+sensitive locations, and denies the network unless you ask for it. See DEVBOX.md.
+
+
+**Things you might use instead:**
+
+- [smol machines](https://www.smolmachines.com/): Same idea - hardware-isolated linux
+  VMs - but it also works on Linux hosts via KVM. Has a cloud service ($10+/mo).
+
+- [exe.dev](https://exe.dev/): persistent cloud VMs, $20+/mo, includes LLM tokens. Seems
+  to have thought about LLM integration and security; may have some story about preventing
+  exfiltration of auth tokens on prompt injection. Check yourself.

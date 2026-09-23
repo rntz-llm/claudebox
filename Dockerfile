@@ -13,16 +13,23 @@ FROM debian:stable-slim
 # mold                              fast linker, used for rust
 # unzip xz-utils zstd               archives
 # python3 python3-venv pipx         python dev
-# vim-tiny                          backup editor ($EDITOR, git)
-# emacs-nox                         real editor
+# vim-tiny nano-tiny                editors ($EDITOR, git)
+# shellcheck                        linting the shell scripts in here
+# buildah                           checking Dockerfile changes
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates bubblewrap curl git less procps python3 socat sudo \
     openssh-client gh \
-    vim-tiny emacs-nox ripgrep fd-find jq \
+    vim-tiny nano-tiny ripgrep fd-find jq \
     build-essential pkg-config libssl-dev mold \
     unzip xz-utils zstd patch file tree rsync \
-    python3-venv pipx \
+    python3-venv pipx shellcheck buildah \
     && rm -rf /var/lib/apt/lists/*
+
+ENV EDITOR nano-tiny
+
+# ~120MB for buildah plus ~40MB for shellcheck is a real chunk of this image;
+# consider removing once claudebox's image is more stable. buildah needs no OCI
+# runtime here: only --isolation chroot works in this VM.
 
 # Debian names the fd binary `fdfind`; everyone (including Claude) types `fd`.
 RUN ln -s /usr/bin/fdfind /usr/local/bin/fd
@@ -54,9 +61,12 @@ RUN useradd -m -s /bin/bash agent \
     && chmod 0440 /etc/sudoers.d/agent
 USER agent
 WORKDIR /home/agent
+# Also moves .claude.json in here, so one mount holds all of Claude's state.
+# Set before the installer, which otherwise leaves a stray ~/.claude.json.
+ENV CLAUDE_CONFIG_DIR /home/agent/.claude
 
-RUN curl -fsSL https://claude.ai/install.sh | bash
 ENV PATH "/home/agent/.local/bin:${PATH}"
+RUN curl -fsSL https://claude.ai/install.sh | bash
 
 # Rust via rustup, not apt: Debian's rustc lags and can't switch toolchains.
 # clippy and rustfmt only -- rust-analyzer (42MB) is an LSP server nothing in
@@ -74,21 +84,32 @@ RUN mkdir -p /home/agent/.cargo && cat > /home/agent/.cargo/config.toml <<'TOML'
 rustflags = ["-C", "link-arg=-fuse-ld=mold"]
 TOML
 ENV TERM xterm-256color
+ENV COLORTERM truecolor
 
-COPY --chown=agent:agent CLAUDE-TEMPLATE.md .claude/CLAUDE.md
-COPY --chown=agent:agent claude-settings-json.json .claude/settings.json
+# image/ holds the files copied into the image, one COPY each. Their names
+# there are deliberately not the names they land under: a repo file called
+# CLAUDE.md would read as instructions to an agent working on claudebox
+# itself, and one called .gitconfig gets bind-mounted read-only by Claude
+# Code's sandbox, which makes it uneditable and undeletable.
+COPY image/claude-CLAUDE.md /etc/claude-code/CLAUDE.md
+# Defaults the entrypoint merges into $CLAUDE_CONFIG_DIR, which claudebox
+# mounts per project; baking them into ~/.claude would be hidden by that mount.
+COPY image/claude-settings.json /etc/claudebox/settings.json
+COPY image/entrypoint /usr/local/bin/claudebox-entrypoint
 # `gh` as the github credential helper. Contains no secrets: `gh auth
 # git-credential` reads from gh's own config, so the container still needs
 # `gh auth login` or a GH_TOKEN passed through `container run --env`.
-COPY --chown=agent:agent gitconfig .gitconfig
-# Identity comes from the host's git config, passed by buildbox.sh.
+COPY --chown=agent:agent image/gitconfig .gitconfig
+# Referenced by gitconfig's core.excludesFile. Hides the files the sandbox
+# bind-mounts into the workspace, which `git add -A` otherwise chokes on.
+COPY --chown=agent:agent image/gitexclude .gitexclude
+# Identity comes from the host's git config, passed by bin/buildbox.
 ARG GIT_USER_NAME=
 ARG GIT_USER_EMAIL=
 RUN if [ -n "$GIT_USER_NAME" ]; then git config --global user.name "$GIT_USER_NAME"; fi; \
     if [ -n "$GIT_USER_EMAIL" ]; then git config --global user.email "$GIT_USER_EMAIL"; fi
-# Avoid prompting for trust of /workspace.
-RUN cat > /home/agent/.claude.json <<EOF
-{ "projects": { "/workspace": { "hasTrustDialogAccepted": true } } }
-EOF
 
 WORKDIR /workspace
+ENTRYPOINT ["/usr/local/bin/claudebox-entrypoint"]
+# Setting ENTRYPOINT clears the CMD inherited from debian.
+CMD ["bash"]

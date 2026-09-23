@@ -1,38 +1,56 @@
 * tasks
 
-** claudebox.sh:: let user supply a name via --name.
+** persistent state between container images on same project?
 
-** put the .sh files in a bin/ dir so I can put them on PATH; remove .sh suffix.
+add an explicit persistent space within .local/state/claudebox/<PROJECT> to allow things to stay across container restarts?
 
-** move the files copied into image into their own dir
-Dockerfile COPY-s some files into image:
+** re-use an existing container if it matches project?
 
-    CLAUDE-TEMPLATE.md          ->  ~/.claude/CLAUDE.md
-    gitconfig                   ->  ~/.gitconfig
-    claude-settings-json.json   ->  ~/.claude/settings.json
+is there any point isolating different claudes on the same project in different claudebox containers if they share their claude config dir? if not, we should probably either go fully-temporary on containers (destroy them at end of session by default) or fully shared & persistent (keep the container around until project destroyed or explicitly pruned, and re-use that container for every `claudebox` command in the same project).
 
-put these into their own directory. if that dir structure mirrors the intended layout in
-image, can I use just one COPY instead of one per file?
+** convert claudebox, buildbox into one script with subcommands
 
-* future ideas
+claudebox run
+claudebox start ?? expose difference b/w container run/start?
+claudebox build
+claudebox prune
+claudebox du
 
-** consider converting claudebox.sh to python if it gets more complex
+Might be a good time to convert it from sh to Python for maintainability's sake.
 
-** container lifetime defaults
-
-now: claudebox.sh runs a long-lived container.
-alternatives:
-
-- `container run --rm` so it's transient.
-
-- `container start` so it doesn't sleep when I leave the session. I often find myself
-  "exec bash"-ing in to the container. If I unexpectedly ctrl-D out of the `container run`
-  session, the container stops and I lose state.
-
-- cache/reuse containers according to the working directory.
-
-** github permissions convenience
+** make it easy to use a narrowly scoped github auth token
 
 would be nice to have a better way to grant tightly scoped github permissions than manually generating PATs.
+
 - make a GH app?
 - other options?
+
+** make it easy to use a less broadly scoped claude token
+
+Currently, within each container when I start `claude` it prompts me to login, which gives it a pretty broadly scoped auth token with ~30 days to live. Instead, I could use a `claude setup-token` token passed as CLAUDE_CODE_OAUTH_TOKEN. This token lasts about a year and is only good for inference. Is that a good fit? There are other options; see token_leak_analysis.md.
+
+** allow giving github url as argument and use that instead of cwd
+
+given a github url, clone the git repo. where, though?
+- temp directory?
+- clone it into current dir using its name?
+- make a directory specifically for git clones?
+- have a config file for this script that specifies?
+
+* things necessary to make this usable by other people than me
+
+** put less into the image and make it configurable at container start time
+choices that are unique to me and don't belong in an image:
+
+- EDITOR=nano
+- most of CLAUDE.md
+- the non-sandbox bits of claude/settings.json
+
+things that other people will want, though they don't have to be baked into the image:
+
+- the CLAUDE.md advice about being inside an apple container.
+- also the `git push -u` advice.
+
+how can/should we inject this info other than baking into the image?
+
+** eventually: runnable on Linux? use Podman + libkrun eg.
