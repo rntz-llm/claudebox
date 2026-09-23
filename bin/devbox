@@ -1,20 +1,31 @@
-#!/bin/bash
+#!/usr/bin/python3 -I
+"""Run a command against the current directory under a macOS sandbox, so that
+repo-supplied code -- git hooks, build scripts, dependencies -- can't write
+outside the repo, read anything outside a fixed allowlist, or talk to the
+network. See DEVBOX.md.
 
-# Run a command against the current directory under a macOS sandbox, so that
-# repo-supplied code -- git hooks, build scripts, dependencies -- can't write
-# outside the repo, read anything outside a fixed allowlist, or talk to the
-# network. See DEVBOX.md.
+The shebang is deliberate. `-I` (isolated) ignores PYTHONPATH/PYTHONHOME, drops
+the user site directory, and keeps this script's own directory off sys.path;
+the absolute interpreter path means an activated .venv or a pyenv shim -- both
+of which are chosen by the directory you are standing in, which is the
+directory you have decided not to trust -- cannot supply the interpreter that
+decides what the sandbox means.
+"""
 
-set -euo pipefail
+import os
+import shutil
+import subprocess
+import sys
+from datetime import datetime
 
-prog="$(basename "$0")"
-cwd="$(pwd -P)"
+PROG = os.path.basename(sys.argv[0])
+SANDBOX_EXEC = "/usr/bin/sandbox-exec"
+LOG = "/usr/bin/log"
 
-usage() {
-    cat <<EOF
-usage: $prog [options] [--] [command [args...]]
+USAGE = """\
+usage: {prog} [options] [--] [command [args...]]
 
-Runs command (default: \$SHELL) under a sandbox profile that allows writes only
+Runs command (default: $SHELL) under a sandbox profile that allows writes only
 to the current directory and to temporary directories, allows reads only of the
 system, the toolchain and the current directory, and by default denies IP
 network access.
@@ -34,142 +45,155 @@ options:
   -h, --help              this
 
 Option parsing stops at the first non-option argument, so flags meant for the
-command need no --:  $prog cargo test --release
-EOF
-}
+command need no --:  {prog} cargo test --release
+"""
 
-# ---------- PLATFORM ----------
-# sandbox-exec is macOS-only.
-if [[ "$(uname -s)" != Darwin ]]; then
-    echo "$prog: macOS only -- sandbox-exec doesn't exist on $(uname -s)." >&2
-    exit 1
-fi
-if [[ ! -x /usr/bin/sandbox-exec ]]; then
-    echo "$prog: /usr/bin/sandbox-exec is missing; nothing to sandbox with." >&2
-    exit 1
-fi
+
+def die(msg):
+    print("%s: %s" % (PROG, msg), file=sys.stderr)
+    sys.exit(1)
+
+
+class ResolveError(Exception):
+    """A path that can't be turned into an absolute physical path. Fatal when
+    the user named it explicitly, ignorable when it came from a default list."""
 
 
 # ---------- PATHS ----------
 
-# Absolute physical path. Does not error if the file does not exist yet, but resolves its
-# directory path fully. macOS has no portable `readlink -f`, hence the shell version.
-#
-# It's important that we fully resolve things because sandbox-exec/macOS Seatbelt matches
-# the resolved physical path, so otherwise `--deny-read a-symlinked-file` wouldn't deny
-# reads to that file.
-resolve() {
-    local p="$1" dir base target links=0
-    # A literal tilde, from a quoted argument the shell didn't expand.
-    # shellcheck disable=SC2088
-    case "$p" in
-        "~")   p="$HOME" ;;
-        "~/"*) p="$HOME/${p#\~/}" ;;
-    esac
-    while [[ -L "$p" ]]; do
-        if (( ++links > 40 )); then
-            echo "$prog: ‘$1’ is more than 40 symlinks deep; a loop?" >&2
-            return 1
-        fi
-        target="$(readlink "$p")"
-        case "$target" in
-            /*) p="$target" ;;
-            *)  p="$(dirname "$p")/$target" ;;
-        esac
-    done
-    if [[ -d "$p" ]]; then
-        (cd "$p" && pwd -P)
-        return
-    fi
-    dir="$(dirname "$p")"
-    base="$(basename "$p")"
-    if [[ ! -d "$dir" ]]; then
-        echo "$prog: no such directory: $dir" >&2
-        return 1
-    fi
-    dir="$(cd "$dir" && pwd -P)"
-    [[ "$dir" == "/" ]] && echo "/$base" || echo "$dir/$base"
-}
+def _split(p):
+    """POSIX dirname/basename, which differ from os.path for trailing slashes
+    and for bare names."""
+    stripped = p.rstrip("/")
+    if not stripped:
+        return "/", "/"
+    head, _, base = stripped.rpartition("/")
+    if not head:
+        head = "/" if p.startswith("/") else "."
+    return head, base
 
-# Profile paths are interpolated into a double-quoted SBPL string, and SBPL has
-# no way to express a literal quote or backslash inside one.
-reject_unquotable() {
-    # shellcheck disable=SC1003  # '\' is a literal backslash, as intended
-    case "$1" in
-        *'"'*|*'\'*|*$'\n'*)
-            echo "$prog: refusing path with a quote, backslash or newline: $1" >&2
-            return 1
-            ;;
-    esac
-}
+
+def resolve(p):
+    """Absolute physical path. Does not error if the file does not exist yet,
+    but resolves its directory path fully.
+
+    It's important that we fully resolve things because sandbox-exec/macOS
+    Seatbelt matches the resolved physical path, so otherwise denying reads of
+    a symlinked file wouldn't deny reads of that file.
+    """
+    original = p
+    # A literal tilde, from a quoted argument the shell didn't expand.
+    if p == "~":
+        p = home()
+    elif p.startswith("~/"):
+        p = os.path.join(home(), p[2:])
+
+    links = 0
+    while os.path.islink(p):
+        links += 1
+        if links > 40:
+            raise ResolveError(
+                "‘%s’ is more than 40 symlinks deep; a loop?" % original)
+        target = os.readlink(p)
+        p = target if target.startswith("/") else os.path.join(_split(p)[0], target)
+
+    if os.path.isdir(p):
+        return os.path.realpath(p)
+
+    head, base = _split(p)
+    if not os.path.isdir(head):
+        raise ResolveError("no such directory: %s" % head)
+    head = os.path.realpath(head)
+    return "/" + base if head == "/" else head + "/" + base
+
+
+def reject_unquotable(p):
+    """Profile paths are interpolated into a double-quoted SBPL string, and
+    SBPL has no way to express a literal quote or backslash inside one."""
+    if '"' in p or "\\" in p or "\n" in p:
+        die("refusing path with a quote, backslash or newline: %s" % p)
+
+
+def home():
+    h = os.environ.get("HOME")
+    if not h:
+        die("HOME is not set.")
+    return h
 
 
 # ---------- ARGUMENTS ----------
 
-network=no
-extra_read=()
-extra_write=()
-print_profile=no
-read_anything=no
-why=no
+def parse_args(argv):
+    """Hand-rolled rather than argparse, which cannot express "stop at the
+    first non-option argument" -- the property that lets you write
+    `devbox cargo test --release` with no `--`. REMAINDER is buggy when the
+    remainder starts with something option-shaped, and parse_known_args
+    scatters the command's own flags into the unrecognised pile."""
+    opts = {
+        "network": "no",
+        "extra_read": [],
+        "extra_write": [],
+        "print_profile": False,
+        "read_anything": False,
+        "why": False,
+    }
 
-while (( $# )); do
-    case "$1" in
-        --network) network="${2-}"; shift $(( $# > 1 ? 2 : 1 )) ;;
-        --network=*) network="${1#--network=}"; shift ;;
-        --allow-read) extra_read+=("${2-}"); shift $(( $# > 1 ? 2 : 1 )) ;;
-        --allow-read=*) extra_read+=("${1#--allow-read=}"); shift ;;
-        --allow-write) extra_write+=("${2-}"); shift $(( $# > 1 ? 2 : 1 )) ;;
-        --allow-write=*) extra_write+=("${1#--allow-write=}"); shift ;;
-        --unsafe-read-anything) read_anything=yes; shift ;;
-        --why) why=yes; shift ;;
-        --print-profile) print_profile=yes; shift ;;
-        -h|--help) usage; exit 0 ;;
-        --) shift; break ;;
-        -*) echo "$prog: unknown option ‘$1’ (see --help)." >&2; exit 1 ;;
-        *) break ;;
-    esac
-done
+    def value(i):
+        """`--flag VALUE`; a trailing `--flag` with nothing after it yields the
+        empty string, which the checks below turn into an error."""
+        return (argv[i + 1], 2) if i + 1 < len(argv) else ("", 1)
 
-case "$network" in
-    yes|no) ;;
-    *) echo "$prog: --network takes ‘yes’ or ‘no’, not ‘${network}’." >&2; exit 1 ;;
-esac
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--network":
+            opts["network"], step = value(i)
+        elif a.startswith("--network="):
+            opts["network"], step = a[len("--network="):], 1
+        elif a == "--allow-read":
+            v, step = value(i)
+            opts["extra_read"].append(v)
+        elif a.startswith("--allow-read="):
+            opts["extra_read"].append(a[len("--allow-read="):])
+            step = 1
+        elif a == "--allow-write":
+            v, step = value(i)
+            opts["extra_write"].append(v)
+        elif a.startswith("--allow-write="):
+            opts["extra_write"].append(a[len("--allow-write="):])
+            step = 1
+        elif a == "--unsafe-read-anything":
+            opts["read_anything"], step = True, 1
+        elif a == "--why":
+            opts["why"], step = True, 1
+        elif a == "--print-profile":
+            opts["print_profile"], step = True, 1
+        elif a in ("-h", "--help"):
+            sys.stdout.write(USAGE.format(prog=PROG))
+            sys.exit(0)
+        elif a == "--":
+            i += 1
+            break
+        elif a.startswith("-"):
+            die("unknown option ‘%s’ (see --help)." % a)
+        else:
+            break
+        i += step
 
-# Vet the paths you asked for up front. An unresolvable allowlist entry would
-# otherwise be dropped and reappear later as a mysterious denial.
-check_allow() {
-    local flag="$1" p
-    shift
-    for p in "$@"; do
-        if [[ -z "$p" ]]; then
-            echo "$prog: $flag needs a path." >&2
-            exit 1
-        fi
-        resolve "$p" >/dev/null
-    done
-}
-check_allow --allow-read ${extra_read[@]+"${extra_read[@]}"}
-check_allow --allow-write ${extra_write[@]+"${extra_write[@]}"}
+    return opts, argv[i:]
 
-if (( $# )); then
-    cmd=("$@")
-else
-    cmd=("${SHELL:-/bin/bash}")
-fi
 
-# ---------- WORKING DIRECTORY MUST BE REASONABLE ----------
-# The whole point is that one directory is writable, so a home directory or the
-# root of the filesystem is not a useful choice: mount a project.
+def check_allow(flag, paths):
+    """Vet the paths you asked for up front. An unresolvable allowlist entry
+    would otherwise be dropped and reappear later as a mysterious denial."""
+    for p in paths:
+        if not p:
+            die("%s needs a path." % flag)
+        try:
+            resolve(p)
+        except ResolveError as e:
+            die(e)
 
-case "$cwd" in
-    /Users/*/*) ;;  # somewhere inside a home directory: fine
-    /|/Users|/Users/*)
-        echo "$prog: refusing to run with ‘${cwd}’ writable: cd to a project directory, not a home directory or the root of the filesystem." >&2
-        exit 1
-        ;;
-esac
-reject_unquotable "$cwd"
 
 # ---------- WHAT THE SANDBOX ALLOWS ----------
 
@@ -177,91 +201,74 @@ reject_unquotable "$cwd"
 # stable paths in macOS, they're world-readable anyway, and narrowing them is
 # how a sandbox turns into something you stop using. Note what is *not* here:
 # /Volumes (a mounted Time Machine disk is a copy of your home directory),
-# /Users (see default_read), and /private/var/folders beyond the scratch
+# /Users (see DEFAULT_READ), and /private/var/folders beyond the scratch
 # directories below.
-system_read=(
-    /bin
-    /sbin
-    /usr
-    /System
-    /Library
-    /Applications
-    /opt
-    /private/etc
-    /private/var/db    # zoneinfo, among other things; the rest is root-owned
-    /private/var/run
-    /dev
-)
-
-# Read access to the toolchain configuration that dev tools need in order to
-# work at all. Everything else under /Users stays unreadable. Cargo's and npm's
-# shared caches are deliberately *not* writable -- see DEVBOX.md.
-default_read=(
-    "$HOME/.gitconfig"
-    "$HOME/.gitexclude"
-    "$HOME/.config/git"
-    "$HOME/.rustup"
-    "$HOME/.cargo"
-)
-
-# To run a command you have to be able to read it. This matters for tools
-# installed under $HOME, like ~/.local/bin/claude, but also for anything
-# outside the system prefixes above. The containing directory, not just the
-# binary, because wrappers commonly exec a sibling.
-cmd_path="$(command -v -- "${cmd[0]}" 2>/dev/null || true)"
-if [[ -n "$cmd_path" && "$cmd_path" == /* ]]; then
-    default_read+=("$(dirname "$cmd_path")")
-fi
+SYSTEM_READ = [
+    "/bin",
+    "/sbin",
+    "/usr",
+    "/System",
+    "/Library",
+    "/Applications",
+    "/opt",
+    "/private/etc",
+    "/private/var/db",  # zoneinfo, among other things; the rest is root-owned
+    "/private/var/run",
+    "/dev",
+]
 
 # Scratch space. $TMPDIR is a per-user directory under /private/var/folders,
 # which also holds per-user caches; /tmp and /var/tmp are world-writable
 # already, so permitting them concedes nothing that a process running as you
 # couldn't already do.
-default_write=(
-    /private/var/folders
-    /private/tmp
-    /private/var/tmp
-)
+DEFAULT_WRITE = [
+    "/private/var/folders",
+    "/private/tmp",
+    "/private/var/tmp",
+]
 
-# One SBPL filter line per path, resolved and vetted. subpath matches the path
-# itself as well as anything under it, so it covers plain files too.
-filters() {
-    local p resolved
-    for p in "$@"; do
+
+def default_read(cmd):
+    """Toolchain configuration that dev tools need in order to work at all.
+    Cargo's and npm's shared caches are deliberately *not* writable -- see
+    DEVBOX.md."""
+    paths = [
+        os.path.join(home(), ".gitconfig"),
+        os.path.join(home(), ".gitexclude"),
+        os.path.join(home(), ".config/git"),
+        os.path.join(home(), ".rustup"),
+        os.path.join(home(), ".cargo"),
+    ]
+    # To run a command you have to be able to read it. This matters for tools
+    # installed under $HOME, like ~/.local/bin/claude, but also for anything
+    # outside the system prefixes above. The containing directory, not just the
+    # binary, because wrappers commonly exec a sibling.
+    cmd_path = shutil.which(cmd[0])
+    if cmd_path and cmd_path.startswith("/"):
+        paths.append(_split(cmd_path)[0])
+    return paths
+
+
+def filters(paths):
+    """One SBPL filter line per path, resolved and vetted. subpath matches the
+    path itself as well as anything under it, so it covers plain files too."""
+    lines = []
+    for p in paths:
         # A path that doesn't exist is not an error here: allowlists name
         # things like caches that a tool may create later, and permitting a
         # path that never appears costs nothing.
-        resolved="$(resolve "$p" 2>/dev/null)" || continue
-        reject_unquotable "$resolved" || exit 1
+        try:
+            r = resolve(p)
+        except ResolveError:
+            continue
+        reject_unquotable(r)
         # (subpath "/") would silently cancel the entire allowlist.
-        if [[ "$resolved" == / ]]; then
-            echo "$prog: ‘/’ as an allowlist entry would permit everything; use --unsafe-read-anything if that is what you mean." >&2
-            exit 1
-        fi
-        printf '       (subpath "%s")\n' "$resolved"
-    done
-}
+        if r == "/":
+            die("‘/’ as an allowlist entry would permit everything; "
+                "use --unsafe-read-anything if that is what you mean.")
+        lines.append('       (subpath "%s")' % r)
+    return "\n".join(lines)
 
-# Everything writable is also readable: a write-only directory is not a useful
-# thing to hand a compiler, and under a global read deny you have to say so.
-write_paths=("$cwd" "${default_write[@]}" ${extra_write[@]+"${extra_write[@]}"})
-read_paths=(
-    "${system_read[@]}"
-    "${default_read[@]}"
-    "${write_paths[@]}"
-    ${extra_read[@]+"${extra_read[@]}"}
-)
-
-read_filters="$(filters "${read_paths[@]}")"
-write_filters="$(filters "${write_paths[@]}")"
-
-# An empty filter list renders as a bare `(allow file-read*)`, which cancels
-# the deny above it and allows everything. Both lists contain $cwd, so this
-# can't happen today -- but the failure is silent and total, so assert it.
-if [[ -z "$read_filters" || -z "$write_filters" ]]; then
-    echo "$prog: internal error: empty allowlist would permit everything." >&2
-    exit 1
-fi
 
 # ---------- THE PROFILE ----------
 # SBPL is last-match-wins, so every deny below is followed by the allows that
@@ -275,23 +282,23 @@ fi
 # list. Files and network are denied by default *within* an allow-default base,
 # which is where the security is; see DEVBOX.md.
 
-profile="(version 1)
+PROFILE = '''(version 1)
 (allow default)
 
 ;; ---- writes: the working directory and scratch space, nothing else ----
 (deny file-write*)
 (allow file-write*
-$write_filters)
+{write_filters})
 ;; The character devices everything expects to be able to write to.
 (allow file-write*
-       (literal \"/dev/null\")
-       (literal \"/dev/zero\")
-       (literal \"/dev/random\")
-       (literal \"/dev/urandom\")
-       (literal \"/dev/dtracehelper\")
-       (literal \"/dev/tty\")
-       (subpath \"/dev/fd\")
-       (regex #\"^/dev/ttys[0-9]+\"))
+       (literal "/dev/null")
+       (literal "/dev/zero")
+       (literal "/dev/random")
+       (literal "/dev/urandom")
+       (literal "/dev/dtracehelper")
+       (literal "/dev/tty")
+       (subpath "/dev/fd")
+       (regex #"^/dev/ttys[0-9]+"))
 
 ;; ---- reads: nothing, then an allowlist ----
 ;; Denied everywhere rather than just under /Users, so that a path nobody
@@ -302,20 +309,17 @@ $write_filters)
 ;; Metadata only, everywhere, so that stat() and path-walking work while
 ;; contents stay unreadable.
 (allow file-read-metadata)
-;; The root directory itself, so that readdir(\"/\") works.
-(allow file-read* (literal \"/\"))
+;; The root directory itself, so that readdir("/") works.
+(allow file-read* (literal "/"))
 (allow file-read*
-$read_filters)"
+{read_filters})'''
 
-if [[ "$read_anything" == yes ]]; then
-    profile="$profile
+READ_ANYTHING = '''
 
 ;; ---- --unsafe-read-anything: the allowlist above is cancelled ----
-(allow file-read*)"
-fi
+(allow file-read*)'''
 
-if [[ "$network" == no ]]; then
-    profile="$profile
+NO_NETWORK = '''
 
 ;; ---- network: no IP, unix sockets kept ----
 ;; Unix-domain sockets are matched by path rather than by address, so allowing
@@ -323,44 +327,114 @@ if [[ "$network" == no ]]; then
 ;; pasteboard helpers) working while every IP address stays unreachable.
 (deny network*)
 (allow network*
-       (subpath \"/private/var/run\")
-       (subpath \"/private/tmp\")
-       (subpath \"/private/var/folders\"))"
-fi
+       (subpath "/private/var/run")
+       (subpath "/private/tmp")
+       (subpath "/private/var/folders"))'''
 
-if [[ "$print_profile" == yes ]]; then
-    printf '%s\n' "$profile"
-    exit 0
-fi
 
-# Marks the shell as sandboxed for anyone who wants to say so in their prompt.
-export DEVBOX=1
+def build_profile(cwd, cmd, opts):
+    # Everything writable is also readable: a write-only directory is not a
+    # useful thing to hand a compiler, and under a global read deny you have to
+    # say so.
+    write_paths = [cwd] + DEFAULT_WRITE + opts["extra_write"]
+    read_paths = SYSTEM_READ + default_read(cmd) + write_paths + opts["extra_read"]
 
-if [[ -t 2 ]]; then
-    echo "$prog: ‘${cwd}’ writable, network ${network}, reads outside the allowlist denied." >&2
-fi
-if [[ "$read_anything" == yes ]]; then
-    echo "$prog: --unsafe-read-anything: every readable file on the machine is readable in here." >&2
-fi
+    read_filters = filters(read_paths)
+    write_filters = filters(write_paths)
 
-if [[ "$why" != yes ]]; then
-    exec /usr/bin/sandbox-exec -p "$profile" "${cmd[@]}"
-fi
+    # An empty filter list renders as a bare `(allow file-read*)`, which
+    # cancels the deny above it and allows everything. Both lists contain the
+    # working directory, so this can't happen today -- but the failure is
+    # silent and total, so assert it.
+    if not read_filters or not write_filters:
+        die("internal error: empty allowlist would permit everything.")
 
-# --why: run rather than exec, so that the denials can be collected afterwards.
-# `log show` after the fact rather than `log stream` alongside, because stream
-# takes a moment to attach and would miss the denials at startup, which are the
-# ones you most want to see.
-started="$(date '+%Y-%m-%d %H:%M:%S')"
-status=0
-/usr/bin/sandbox-exec -p "$profile" "${cmd[@]}" || status=$?
-echo "$prog: sandbox denials since ${started}:" >&2
-# A denial is logged as e.g.
-#   Sandbox: bash(123) deny(1) file-read-data /Users/me/.ssh/id_ed25519
-# The predicate is the part most likely to need adjusting across macOS
-# releases; `log show --last 2m --predicate 'eventMessage CONTAINS "deny("'`
-# by hand is the fallback.
-/usr/bin/log show --style compact --start "$started" \
-    --predicate 'eventMessage CONTAINS "deny("' 2>/dev/null \
-    | grep -v '^Timestamp' >&2 || echo "$prog: none logged." >&2
-exit "$status"
+    profile = PROFILE.format(read_filters=read_filters, write_filters=write_filters)
+    if opts["read_anything"]:
+        profile += READ_ANYTHING
+    if opts["network"] == "no":
+        profile += NO_NETWORK
+    return profile
+
+
+# ---------- RUNNING ----------
+
+def run_with_why(profile, cmd):
+    """--why: run rather than exec, so that the denials can be collected
+    afterwards. `log show` after the fact rather than `log stream` alongside,
+    because stream takes a moment to attach and would miss the denials at
+    startup, which are the ones you most want to see."""
+    started = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    status = subprocess.call([SANDBOX_EXEC, "-p", profile] + cmd)
+    print("%s: sandbox denials since %s:" % (PROG, started), file=sys.stderr)
+    # A denial is logged as e.g.
+    #   Sandbox: bash(123) deny(1) file-read-data /Users/me/.ssh/id_ed25519
+    # The predicate is the part most likely to need adjusting across macOS
+    # releases; `log show --last 2m --predicate 'eventMessage CONTAINS "deny("'`
+    # by hand is the fallback.
+    out = subprocess.run(
+        [LOG, "show", "--style", "compact", "--start", started,
+         "--predicate", 'eventMessage CONTAINS "deny("'],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+    ).stdout
+    lines = [l for l in out.splitlines() if not l.startswith("Timestamp")]
+    if lines:
+        print("\n".join(lines), file=sys.stderr)
+    else:
+        print("%s: none logged." % PROG, file=sys.stderr)
+    return status
+
+
+def main():
+    # ---------- PLATFORM ----------
+    # sandbox-exec is macOS-only.
+    if os.uname().sysname != "Darwin":
+        die("macOS only -- sandbox-exec doesn't exist on %s." % os.uname().sysname)
+    if not os.access(SANDBOX_EXEC, os.X_OK):
+        die("%s is missing; nothing to sandbox with." % SANDBOX_EXEC)
+
+    cwd = os.getcwd()
+    opts, rest = parse_args(sys.argv[1:])
+
+    if opts["network"] not in ("yes", "no"):
+        die("--network takes ‘yes’ or ‘no’, not ‘%s’."
+            % opts["network"])
+
+    check_allow("--allow-read", opts["extra_read"])
+    check_allow("--allow-write", opts["extra_write"])
+
+    cmd = rest if rest else [os.environ.get("SHELL") or "/bin/bash"]
+
+    # ---------- WORKING DIRECTORY MUST BE REASONABLE ----------
+    # The whole point is that one directory is writable, so a home directory or
+    # the root of the filesystem is not a useful choice: mount a project.
+    parts = cwd.split("/")  # "/Users/me/x" -> ['', 'Users', 'me', 'x']
+    inside_a_home = len(parts) > 3 and parts[1] == "Users"
+    if not inside_a_home and (cwd == "/" or cwd == "/Users" or cwd.startswith("/Users/")):
+        die("refusing to run with ‘%s’ writable: cd to a project "
+            "directory, not a home directory or the root of the filesystem." % cwd)
+    reject_unquotable(cwd)
+
+    profile = build_profile(cwd, cmd, opts)
+
+    if opts["print_profile"]:
+        print(profile)
+        return 0
+
+    # Marks the shell as sandboxed for anyone who wants to say so in a prompt.
+    os.environ["DEVBOX"] = "1"
+
+    if sys.stderr.isatty():
+        print("%s: ‘%s’ writable, network %s, reads outside the "
+              "allowlist denied." % (PROG, cwd, opts["network"]), file=sys.stderr)
+    if opts["read_anything"]:
+        print("%s: --unsafe-read-anything: every readable file on the machine "
+              "is readable in here." % PROG, file=sys.stderr)
+
+    if not opts["why"]:
+        os.execv(SANDBOX_EXEC, [SANDBOX_EXEC, "-p", profile] + cmd)
+    return run_with_why(profile, cmd)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
