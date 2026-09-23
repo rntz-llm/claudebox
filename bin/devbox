@@ -20,6 +20,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import NoReturn
 
+# An ordered (action, path) pair, where action is "allow" or "deny".
+Rule = tuple[str, str]
+
 def home() -> str:
     h = os.environ.get("HOME")
     if not h: die("HOME is not set.")
@@ -31,8 +34,9 @@ LOG = "/usr/bin/log"
 XDG_CONFIG_DIR = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home(), ".config")
 CONFIG_DIR = os.path.join(XDG_CONFIG_DIR, "devbox")
 
-# An ordered (action, path) pair, where action is "allow" or "deny".
-Rule = tuple[str, str]
+def die(msg) -> NoReturn:
+    print(f"{PROG}: {msg}", file=sys.stderr)
+    sys.exit(1)
 
 USAGE = """\
 usage: {prog} [options] [--] [command [args...]]
@@ -68,10 +72,6 @@ command need no --:  {prog} cargo test --release
     deny_read=os.path.join(CONFIG_DIR, "deny-read"),
     allow_write=os.path.join(CONFIG_DIR, "allow-write"),
 )
-
-def die(msg) -> NoReturn:
-    print(f"{PROG}: {msg}", file=sys.stderr)
-    sys.exit(1)
 
 
 # -------------------- PATHS --------------------
