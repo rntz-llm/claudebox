@@ -73,7 +73,7 @@ def die(msg) -> NoReturn:
     print(f"{PROG}: {msg}", file=sys.stderr)
     sys.exit(1)
 
-
+
 # ---------- PATHS ----------
 
 class ResolveError(Exception):
@@ -130,6 +130,7 @@ def vet(path: str, missing_ok: bool = False) -> str:
     if p == "/":
         die("‘/’ is not a usable rule: name a directory under it.")
     return p
+
 
 # ---------- ARGUMENTS ----------
 
@@ -228,6 +229,7 @@ def read_config(name: str, action: str) -> list[Rule]:
         else:
             rules.append((action, line))
     return rules
+
 
 # ---------- POLICY ----------
 # Reads are allowed by default and taken away by name; writes are denied by
@@ -407,6 +409,7 @@ def build_profile(cwd: str, opts: Options) -> str:
                              device_writes=DEVICE_WRITES,
                              read_rules=stanzas(reads, "file-read*"))
     return profile + NO_NETWORK if opts.network == "no" else profile
+
 
 # ---------- RUNNING ----------
 
