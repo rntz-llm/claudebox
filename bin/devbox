@@ -20,9 +20,16 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import NoReturn
 
+def home() -> str:
+    h = os.environ.get("HOME")
+    if not h: die("HOME is not set.")
+    return h
+
 PROG = os.path.basename(sys.argv[0])
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 LOG = "/usr/bin/log"
+XDG_CONFIG_DIR = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home(), ".config")
+CONFIG_DIR = os.path.join(XDG_CONFIG_DIR, "devbox")
 
 # An ordered (action, path) pair, where action is "allow" or "deny".
 Rule = tuple[str, str]
@@ -36,41 +43,37 @@ sensitive directories, and by default denies network access.
 
 options:
   --network=yes|no     allow IP networking (default: no)
-  --allow-read PATH    permit reads under PATH, overriding a deny (repeatable)
-  --allow-write PATH   permit writes under PATH (repeatable)
+  --allow-read PATH    permit reads under PATH, overriding a deny
+  --deny-read PATH     deny reads under PATH
+  --allow-write PATH   permit writes under PATH
+  --deny-write PATH    deny writes under PATH, overriding an allow
   --why                report the sandbox denials the command caused, after it
                        exits. This is how you find out what to add.
   --print-profile      print the generated sandbox profile and exit
   -h, --help           this
 
-Defaults are extended by two files, one path per line, '#' for a comment and a
-leading '!' to reverse a default:
+The --allow/--deny options are repeatable and apply in the order you give
+them; the last one matching a path wins. Defaults are extended by two files,
+one path per line, '#' for a comment and a leading '!' to reverse a default:
   {deny_read}
   {allow_write}
 
+Precedence, lowest first: the built-in defaults, the working directory, the
+config files, then the command line.
+
 Option parsing stops at the first non-option argument, so flags meant for the
 command need no --:  {prog} cargo test --release
-"""
+""".format(
+    prog=PROG,
+    deny_read=os.path.join(CONFIG_DIR, "deny-read"),
+    allow_write=os.path.join(CONFIG_DIR, "allow-write"),
+)
 
 def die(msg) -> NoReturn:
     print(f"{PROG}: {msg}", file=sys.stderr)
     sys.exit(1)
 
-def home() -> str:
-    h = os.environ.get("HOME")
-    if not h:
-        die("HOME is not set.")
-    return h
-
-def config_dir() -> str:
-    xdg = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home(), ".config")
-    return os.path.join(xdg, "devbox")
-
-def usage() -> str:
-    return USAGE.format(prog=PROG,
-                        deny_read=os.path.join(config_dir(), "deny-read"),
-                        allow_write=os.path.join(config_dir(), "allow-write"))
-
+
 # ---------- PATHS ----------
 
 class ResolveError(Exception):
@@ -133,10 +136,15 @@ def vet(path: str, missing_ok: bool = False) -> str:
 @dataclass
 class Options:
     network: str = "no"
-    allow_read: list[str] = field(default_factory=list)
-    allow_write: list[str] = field(default_factory=list)
+    # Kept as rules rather than two allow-lists so that --allow-read and
+    # --deny-read keep their order relative to each other on the command line.
+    read_rules: list[Rule] = field(default_factory=list)
+    write_rules: list[Rule] = field(default_factory=list)
     print_profile: bool = False
     why: bool = False
+
+VALUE_FLAGS = ("--network", "--allow-read", "--deny-read",
+               "--allow-write", "--deny-write")
 
 def parse_args(argv: list[str]) -> tuple[Options, list[str]]:
     """Hand-rolled rather than argparse, which cannot express "stop at the
@@ -149,7 +157,7 @@ def parse_args(argv: list[str]) -> tuple[Options, list[str]]:
     while i < len(argv):
         arg, step = argv[i], 1
         name, eq, inline = arg.partition("=")
-        if name in ("--network", "--allow-read", "--allow-write"):
+        if name in VALUE_FLAGS:
             # Both `--flag=VALUE` and `--flag VALUE`. A trailing `--flag` with
             # nothing after it yields "", which the checks below reject.
             if eq:
@@ -158,16 +166,17 @@ def parse_args(argv: list[str]) -> tuple[Options, list[str]]:
                 value, step = (argv[i + 1] if i + 1 < len(argv) else ""), 2
             if name == "--network":
                 opts.network = value
-            elif name == "--allow-read":
-                opts.allow_read.append(value)
             else:
-                opts.allow_write.append(value)
+                action, _, kind = name[2:].partition("-")  # --allow-read
+                rules = (opts.read_rules if kind == "read"
+                         else opts.write_rules)
+                rules.append((action, value))
         elif arg == "--why":
             opts.why = True
         elif arg == "--print-profile":
             opts.print_profile = True
         elif arg in ("-h", "--help"):
-            sys.stdout.write(usage())
+            sys.stdout.write(USAGE)
             sys.exit(0)
         elif arg == "--":
             i += 1
@@ -179,16 +188,19 @@ def parse_args(argv: list[str]) -> tuple[Options, list[str]]:
         i += step
     return opts, argv[i:]
 
-def check_flag_paths(flag: str, paths: list[str]) -> None:
+def check_flag_rules(rules: list[Rule], kind: str) -> None:
     """Vet the paths you asked for up front. An unresolvable one would
-    otherwise be dropped and reappear later as a mysterious denial."""
-    for p in paths:
+    otherwise be dropped and reappear later as a mysterious denial. Stricter
+    than the config files, which may name tools you haven't installed: a path
+    you just typed should exist, or at least its parent should."""
+    for action, p in rules:
+        flag = f"--{action}-{kind}"
         if not p:
             die(f"{flag} needs a path.")
         try:
             resolve(p)
         except ResolveError as e:
-            die(e)
+            die(f"{e} (from {flag})")
 
 def read_config(name: str, action: str) -> list[Rule]:
     """One path per line, in file order; blank lines and lines starting with
@@ -198,7 +210,7 @@ def read_config(name: str, action: str) -> list[Rule]:
 
     Only whole-line comments: a '#' is legal in a path, and silently truncating
     someone's allowlist at one would be the wrong kind of surprise."""
-    path = os.path.join(config_dir(), name)
+    path = os.path.join(CONFIG_DIR, name)
     reversed_ = "allow" if action == "deny" else "deny"
     try:
         with open(path) as f:
@@ -286,7 +298,8 @@ def scratch_dirs() -> list[str]:
     tmpdir = os.environ.get("TMPDIR") or "/private/var/folders"
     return [tmpdir, "/private/tmp", "/private/var/tmp"]
 
-def read_ruleset(cwd: str, opts: Options) -> list[Rule]:
+def default_read_rules() -> list[Rule]:
+    """The built-in read policy: the lowest precedence layer."""
     h = home()
     rules: list[Rule] = [("deny", "/Users"), ("allow", h)]  # other homes shut
     rules += [("deny", p) for p in DENY_READ_ABS]
@@ -295,12 +308,16 @@ def read_ruleset(cwd: str, opts: Options) -> list[Rule]:
     rules += [("allow", os.path.join(h, p)) for p in LIBRARY_ALLOW]
     rules += [("deny", os.path.join(h, p)) for p in LIBRARY_REDENY]
     # Which paths are protected is itself a hint worth not handing over.
-    rules += [("deny", config_dir())]
-    rules += read_config("deny-read", "deny")
-    rules += [("allow", p) for p in opts.allow_read]
-    # Last, so the repo can always read itself whatever else matched.
-    rules += [("allow", cwd)]
+    rules += [("deny", CONFIG_DIR)]
     return rules
+
+def read_ruleset(cwd: str, opts: Options) -> list[Rule]:
+    # Defaults, then the repo, then your config, then your command line. The
+    # working directory is re-allowed ahead of the last two so that a default
+    # can't shut the repo -- but `--deny-read ./secrets` still bites, because
+    # a flag that silently did nothing would be the worse failure.
+    return (default_read_rules() + [("allow", cwd)]
+            + read_config("deny-read", "deny") + opts.read_rules)
 
 def write_ruleset(cwd: str, opts: Options) -> list[Rule]:
     rules: list[Rule] = [("allow", cwd)]
@@ -312,7 +329,7 @@ def write_ruleset(cwd: str, opts: Options) -> list[Rule]:
               ("deny", os.path.join(cwd, ".git/config"))]
     # After the .git denies, so naming one of them in the config reverses it.
     rules += read_config("allow-write", "allow")
-    rules += [("allow", p) for p in opts.allow_write]
+    rules += opts.write_rules
     return rules
 
 def stanzas(rules: list[Rule], op: str) -> str:
@@ -335,11 +352,13 @@ def stanzas(rules: list[Rule], op: str) -> str:
         out.append(f"({action} {op}\n{body})")
     return "\n".join(out)
 
-def refuse_denied_cwd(cwd: str, reads: list[Rule]) -> None:
-    """The final (allow file-read* (subpath cwd)) would override any deny the
-    working directory happens to fall under, so refuse rather than quietly undo
-    one: `cd ~/.ssh && devbox` is a mistake, not a request."""
-    for action, path in reads:
+def refuse_denied_cwd(cwd: str) -> None:
+    """Re-allowing the working directory would override a built-in deny it
+    happens to sit under, so refuse instead of quietly undoing one:
+    `cd ~/.ssh && devbox` is a mistake, not a request. Only the defaults are
+    policed; denying your own repo from the config file or the command line is
+    a thing you are allowed to mean."""
+    for action, path in default_read_rules():
         if action != "deny":
             continue
         try:
@@ -377,8 +396,8 @@ NO_NETWORK = '''
        (subpath "/private/var/folders"))'''
 
 def build_profile(cwd: str, opts: Options) -> str:
+    refuse_denied_cwd(cwd)
     reads = read_ruleset(cwd, opts)
-    refuse_denied_cwd(cwd, reads)
     write_rules = stanzas(write_ruleset(cwd, opts), "file-write*")
     # A bare `(allow file-write*)` -- what an empty stanza renders as -- would
     # cancel the deny above it and make the whole filesystem writable.
@@ -435,8 +454,8 @@ def main() -> int:
     opts, rest = parse_args(sys.argv[1:])
     if opts.network not in ("yes", "no"):
         die(f"--network takes ‘yes’ or ‘no’, not ‘{opts.network}’.")
-    check_flag_paths("--allow-read", opts.allow_read)
-    check_flag_paths("--allow-write", opts.allow_write)
+    check_flag_rules(opts.read_rules, "read")
+    check_flag_rules(opts.write_rules, "write")
     cmd = rest or [os.environ.get("SHELL") or "/bin/bash"]
 
     refuse_unreasonable_cwd(cwd)

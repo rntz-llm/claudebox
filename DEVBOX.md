@@ -13,7 +13,8 @@ cd ~/src/someones-repo
 devbox                            # a shell, sandboxed
 devbox cargo test                 # one command
 devbox --network=yes npm ci       # when a step genuinely needs the network
-devbox --allow-write ~/.npm       # widen the write allowlist for one run
+devbox --allow-write ~/.npm       # widen the write policy for one run
+devbox --deny-read ./vendor       # ...or narrow either one
 devbox --why cargo build          # ...and find out what to widen it with
 devbox --print-profile            # see exactly what the profile says
 ```
@@ -126,11 +127,19 @@ ignored; `~` is expanded; a leading `!` reverses the file's sense, so a
 !~/src/scratch/.git/config      # let git write config in this one repo
 ```
 
-Entries are applied after the built-in defaults, so yours always win.
-`--allow-read PATH` and `--allow-write PATH` do the same thing for a single
-run, and are repeatable. There is deliberately no per-project config file: the
-repo is the thing being contained, so it does not get to name its own
-exceptions.
+`--allow-read`, `--deny-read`, `--allow-write` and `--deny-write` do the same
+for a single run. All of them are repeatable, and they apply in the order you
+write them, so `--deny-read ~/x --allow-read ~/x/pub` means what it looks like.
+
+Precedence runs lowest to highest: the built-in defaults, then the working
+directory, then the config files, then the command line. The working directory
+is re-allowed ahead of the last two so a default can't shut your repo — but
+`--deny-read ./secrets` still takes effect, because a flag that silently did
+nothing would be the worse failure. `cd ~/.ssh && devbox` is refused outright
+rather than quietly re-allowed.
+
+There is deliberately no per-project config file: the repo is the thing being
+contained, so it does not get to name its own exceptions.
 
 ## When something won't run
 
