@@ -74,7 +74,7 @@ def die(msg) -> NoReturn:
     sys.exit(1)
 
 
-# ---------- PATHS ----------
+# -------------------- PATHS --------------------
 
 class ResolveError(Exception):
     """A path that can't be turned into an absolute physical path.
@@ -132,7 +132,7 @@ def vet(path: str, missing_ok: bool = False) -> str:
     return p
 
 
-# ---------- ARGUMENTS ----------
+# -------------------- ARGUMENTS --------------------
 
 @dataclass
 class Options:
@@ -231,7 +231,7 @@ def read_config(name: str, action: str) -> list[Rule]:
     return rules
 
 
-# ---------- POLICY ----------
+# -------------------- POLICY --------------------
 # Reads are allowed by default and taken away by name; writes are denied by
 # default and given back by name. The asymmetry is deliberate. "Files my dev
 # environment reads" is long, personal and open-ended, so enumerating it
@@ -411,7 +411,7 @@ def build_profile(cwd: str, opts: Options) -> str:
     return profile + NO_NETWORK if opts.network == "no" else profile
 
 
-# ---------- RUNNING ----------
+# -------------------- RUNNING --------------------
 
 def run_with_why(profile: str, cmd: list[str]) -> int:
     """--why: run rather than exec, so that the denials can be collected

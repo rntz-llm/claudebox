@@ -6,9 +6,8 @@ Exception: files should when useful be separated into sections, separated by two
 def bar(): ...
 
 
-# ---------- SECTION NAME IN ALL CAPS ----------
+# -------------------- SECTION NAME IN ALL CAPS --------------------
+# more explanation/documentation for section goes here if necessary.
 
 def foo(): ...
 ```
-
-Note the double empty lines before the section header comment.
