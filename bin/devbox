@@ -26,21 +26,22 @@ from typing import NoReturn
 Directive = tuple[str, str, str]  # (action, op, path)
 Rule = tuple[str, str]            # (action, path), within a single op
 
+PROG = os.path.basename(sys.argv[0])
+
+def die(msg) -> NoReturn:
+    print(f"{PROG}: {msg}", file=sys.stderr)
+    sys.exit(1)
+
 def home() -> str:
     h = os.environ.get("HOME")
     if not h: die("HOME is not set.")
     return h
 
-PROG = os.path.basename(sys.argv[0])
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 LOG = "/usr/bin/log"
 XDG_CONFIG_DIR = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home(), ".config")
 CONFIG_DIR = os.path.join(XDG_CONFIG_DIR, "devbox")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "rules")
-
-def die(msg) -> NoReturn:
-    print(f"{PROG}: {msg}", file=sys.stderr)
-    sys.exit(1)
 
 USAGE = """\
 usage: {prog} [options] [--] [command [args...]]
