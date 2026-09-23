@@ -428,6 +428,9 @@ def build_profile(cwd: str, opts: Options) -> str:
     write_rules = stanzas(rules_for("write", directives), "file-write*")
     # A bare `(allow file-write*)` -- what an empty stanza renders as -- would
     # cancel the deny above it and make the whole filesystem writable.
+    #
+    # FIXME: this seems like the wrong place to catch this. should stanzas() do
+    # it?
     if "(allow file-write*\n" not in write_rules:
         die("internal error: no writable path; the profile would be unsafe.")
     profile = PROFILE.format(write_rules=write_rules,
