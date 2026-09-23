@@ -33,7 +33,10 @@ would be nice to have a better way to grant tightly scoped github permissions th
 
 ** make it easy to use a less broadly scoped claude token
 
-Currently, within each container when I start `claude` it prompts me to login, which gives it a pretty broadly scoped auth token with ~30 days to live. Instead, I could use a `claude setup-token` token passed as CLAUDE_CODE_OAUTH_TOKEN. This token lasts about a year and is only good for inference. Is that a good fit? There are other options; see token_leak_analysis.md.
+Done: claudebox-token stores a `claude setup-token` token in the keychain; claudebox mounts
+it and the image's bin/claude feeds it to claude on fd 9. Untested on macOS -- check that
+claude starts without /login, that .credentials.json stays absent, and that the keychain
+read doesn't prompt every launch.
 
 ** allow giving github url as argument and use that instead of cwd
 

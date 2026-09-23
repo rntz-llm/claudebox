@@ -1,0 +1,21 @@
+#!/bin/sh
+
+# Runs claude with the token claudebox mounted at $secret, handed over on fd 9.
+# A pipe, not the file: whatever claude spawns inherits fd 9, and a pipe is empty
+# once claude has read it, while an open file would still hold the token.
+# Unreadable (no token mounted, or a sandboxed caller denied the path) means
+# falling back to whatever credential claude finds for itself.
+
+set -u
+secret=/run/claudebox-secrets/oauth-token
+claude=/home/agent/.local/bin/claude
+
+unset CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR
+if [ -r "$secret" ] && token="$(cat "$secret" 2>/dev/null)" && [ -n "$token" ]; then
+    export CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=9
+    exec 9<<EOF
+$token
+EOF
+fi
+unset token
+exec "$claude" "$@"

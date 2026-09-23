@@ -1,0 +1,90 @@
+#!/bin/bash
+
+# Stores an inference-only Claude auth token (`claude setup-token`) in the login
+# keychain, where bin/claudebox picks it up. Such a token can only run models:
+# leaking it doesn't hand over claude.ai connectors, cloud sessions or Remote
+# Control the way a /login credential does. macOS only; without `security`,
+# `get` stays quiet so claudebox can fall back to /login.
+
+set -euo pipefail
+
+service=claudebox
+account=oauth-token
+
+usage() {
+    cat >&2 <<EOF
+usage: claudebox-token (set|get|status|delete)
+
+  set     run \`claude setup-token\` and store the token it prints
+  get     print the stored token (exit 1 if there is none)
+  status  say whether a token is stored
+  delete  remove the stored token
+
+The token is not revoked by \`delete\`; do that at claude.ai > Settings.
+EOF
+    exit 2
+}
+
+need_security() {
+    if ! command -v security >/dev/null; then
+        echo "claudebox-token: no \`security\` command; this needs macOS." >&2
+        exit 1
+    fi
+}
+
+get() {
+    command -v security >/dev/null || return 1
+    security find-generic-password -s "$service" -a "$account" -w 2>/dev/null
+}
+
+set_token() {
+    need_security
+    if ! command -v claude >/dev/null; then
+        echo "claudebox-token: no \`claude\` on PATH." >&2
+        echo "Install Claude Code on this Mac (https://claude.ai/install.sh), or run" >&2
+        echo "\`claude setup-token\` elsewhere and paste the token here." >&2
+    else
+        echo "Running \`claude setup-token\`. It prints a token; copy it, then paste it below."
+        echo
+        claude setup-token || true
+        echo
+    fi
+
+    local token=
+    read -r -s -p "Paste the token: " token
+    echo
+    # Not a format check on Anthropic's behalf, just a nudge when an obviously
+    # wrong thing (a URL, a login code, a shell prompt) gets pasted.
+    if [[ -z "$token" ]]; then
+        echo "claudebox-token: nothing pasted; keychain unchanged." >&2
+        exit 1
+    fi
+    if [[ "$token" == *[[:space:]]* ]]; then
+        echo "claudebox-token: that contains whitespace, so it isn't a token." >&2
+        exit 1
+    fi
+    if [[ "$token" != sk-ant-* ]]; then
+        echo "claudebox-token: warning: tokens normally start with ‘sk-ant-’; storing it anyway." >&2
+    fi
+
+    # Piped to `security -i` rather than passed as arguments: a password on a
+    # command line shows up in `ps`.
+    printf 'add-generic-password -U -s %q -a %q -w %q\n' \
+        "$service" "$account" "$token" | security -i
+    token=
+    echo "Stored. \`claudebox\` will use it; macOS may ask to allow access the first time."
+}
+
+case "${1:-}" in
+    set) set_token ;;
+    get) get || { echo "claudebox-token: no token stored." >&2; exit 1; } ;;
+    status)
+        if get >/dev/null; then echo "A token is stored (keychain: $service/$account)."
+        else echo "No token stored."; exit 1; fi ;;
+    delete)
+        need_security
+        security delete-generic-password -s "$service" -a "$account" >/dev/null
+        echo "Deleted from the keychain. This does NOT revoke it: to do that, sign out of"
+        echo "all sessions at claude.ai > Settings." ;;
+    *) usage ;;
+esac

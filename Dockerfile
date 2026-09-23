@@ -96,6 +96,9 @@ COPY image/claude-CLAUDE.md /etc/claude-code/CLAUDE.md
 # mounts per project; baking them into ~/.claude would be hidden by that mount.
 COPY image/claude-settings.json /etc/claudebox/settings.json
 COPY image/entrypoint /usr/local/bin/claudebox-entrypoint
+# Ahead of the real claude on PATH: feeds it the token claudebox mounts.
+COPY image/claude-wrapper /opt/claudebox/bin/claude
+ENV PATH "/opt/claudebox/bin:${PATH}"
 # `gh` as the github credential helper. Contains no secrets: `gh auth
 # git-credential` reads from gh's own config, so the container still needs
 # `gh auth login` or a GH_TOKEN passed through `container run --env`.
