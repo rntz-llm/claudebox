@@ -420,7 +420,7 @@ def build_profile(paths: Paths, opts: Options) -> str:
 
 
 # -------------------- RUNNING --------------------
-def run_with_why(profile: str, cmd: list[str]) -> int:
+def run_with_why(argv: list[str]) -> int:
     """--why: run rather than exec, so that the denials can be collected
     afterwards. `log show` after the fact rather than `log stream` alongside,
     because stream takes a moment to attach and would miss the denials at
@@ -429,9 +429,8 @@ def run_with_why(profile: str, cmd: list[str]) -> int:
     # Ctrl-C reaches the child through the terminal; the report should survive
     # it, so only the child gets the default action.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
-    status = subprocess.call(
-        [SANDBOX_EXEC, "-p", profile] + cmd,
-        preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
+    status = subprocess.call(argv, preexec_fn=lambda: signal.signal(
+        signal.SIGINT, signal.SIG_DFL))
     print(f"{PROG}: sandbox denials since {started}:", file=sys.stderr)
     # A denial is logged as e.g.
     #   Sandbox: bash(123) deny(1) file-read-data /Users/me/.ssh/id_ed25519
@@ -494,10 +493,12 @@ def main() -> int:
     # Marks the shell as sandboxed for anyone who wants to say so in a prompt.
     os.environ["DEVBOX"] = "1"
 
+    # "--", or a command starting with "-" would be sandbox-exec's option.
+    argv = [SANDBOX_EXEC, "-p", profile, "--"] + cmd
     if not opts.why:
-        os.execv(SANDBOX_EXEC, [SANDBOX_EXEC, "-p", profile] + cmd)
+        os.execv(SANDBOX_EXEC, argv)
     else:
-        return run_with_why(profile, cmd)
+        return run_with_why(argv)
 
 if __name__ == "__main__":
     sys.exit(main())
