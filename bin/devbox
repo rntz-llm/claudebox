@@ -119,7 +119,10 @@ def resolve(p: str) -> str:
 
 def vet(path: str) -> str:
     """Resolve a rule's path and check it can be written into the profile."""
-    p = resolve(path)
+    try:
+        p = resolve(path)
+    except OSError as e:
+        die(f"{e.filename}: {e.strerror}")
     # Paths are interpolated into a double-quoted SBPL string, and SBPL cannot
     # express a literal quote or backslash inside one.
     if '"' in p or "\\" in p or "\n" in p:
@@ -153,16 +156,15 @@ def parse_args(argv: list[str]) -> tuple[Options, list[str]]:
     and parse_known_args scatters the command's own flags into the unrecognised
     pile.
     """
-    opts = Options()
-    i = 0
-    while i < len(argv):
-        arg, step = argv[i], 1
-        name, eq, inline = arg.partition("=")
+    opts, args = Options(), list(argv)
+    while args and args[0].startswith("-"):
+        arg = args.pop(0)
+        name, eq, value = arg.partition("=")
         if name in VALUE_FLAGS:
             # Both `--flag=VALUE` and `--flag VALUE`.
-            if eq: value = inline
-            elif i + 1 < len(argv): value, step = argv[i + 1], 2
-            else: die(f"{name} needs an argument.")
+            if not eq:
+                if not args: die(f"{name} needs an argument.")
+                value = args.pop(0)
             if not value: die(f"{name}: empty argument.")
             if name == "--network":
                 if value not in ("yes", "no"):
@@ -179,14 +181,10 @@ def parse_args(argv: list[str]) -> tuple[Options, list[str]]:
             opts.help = True
             return opts, []
         elif arg == "--":
-            i += 1
             break
-        elif arg.startswith("-"):
-            die(f"unknown option ‘{arg}’ (see --help).")
         else:
-            break
-        i += step
-    return opts, argv[i:]
+            die(f"unknown option ‘{arg}’ (see --help).")
+    return opts, args
 
 def read_config(config_file: str) -> list[Directive]:
     """`DIRECTIVE PATH` per line, in file order, where DIRECTIVE is one of the
@@ -208,13 +206,14 @@ def read_config(config_file: str) -> list[Directive]:
         if not line or line.startswith("#"):
             continue
         word, _, path = line.partition(" ")
+        path = path.strip()
         if word not in DIRECTIVES:
             die(f"{config_file}:{n}: expected one of "
                 f"{', '.join(DIRECTIVES)}, got ‘{word}’")
-        if not path.strip():
+        if not path:
             die(f"{config_file}:{n}: {word} needs a path")
         action, _, op = word.partition("-")
-        directives.append((action, op, path.strip()))
+        directives.append((action, op, path))
     return directives
 
 
@@ -230,19 +229,6 @@ def read_config(config_file: str) -> list[Directive]:
 # The downside is that a secret nobody deny-listed stays readable. With the
 # network off by default that is staged rather than immediate exfiltration,
 # which is the trade being made. See DEVBOX.md.
-
-# The character devices everything expects to be able to write to. Not
-# subpaths, so this is a fixed stanza rather than a rule.
-DEVICE_WRITES = '''(allow file-write*
-       (literal "/dev/null")
-       (literal "/dev/zero")
-       (literal "/dev/random")
-       (literal "/dev/urandom")
-       (literal "/dev/dtracehelper")
-       (literal "/dev/tty")
-       (literal "/dev/ptmx")
-       (subpath "/dev/fd")
-       (regex #"^/dev/ttys[0-9]+$"))'''
 
 def default_directives(paths: Paths) -> list[Directive]:
     """The built-in policy, lowest precedence. Last match wins."""
@@ -335,12 +321,16 @@ def expand(d: Directive) -> list[Directive]:
     if (action, op) == ("deny", "read"): return [d, ("deny", "write", path)]
     return [d]
 
+def resolved(ds: list[Directive]) -> list[Directive]:
+    """Vet each path, then expand. Every rule either renders or is fatal."""
+    return [e for action, op, p in ds for e in expand((action, op, vet(p)))]
+
 def ruleset(paths: Paths, opts: Options) -> list[Directive]:
     """The whole policy as one ordered stream: defaults, then your config
     file, then your command line, each able to override what came before."""
-    ds = (default_directives(paths) + read_config(paths.config_file)
-          + opts.directives)
-    return [e for d in ds for e in expand(d)]
+    defaults = resolved(default_directives(paths))
+    refuse_denied_cwd(paths.cwd, defaults)
+    return defaults + resolved(read_config(paths.config_file) + opts.directives)
 
 def rules_for(op: str, directives: list[Directive]) -> list[Rule]:
     return [(action, path) for action, o, path in directives if o == op]
@@ -349,21 +339,13 @@ def stanzas(rules: list[Rule], op: str) -> str:
     """Render rules as SBPL, one stanza per run of like actions. The order is
     the meaning: SBPL is last-match-wins, so a later rule overrides an earlier
     one and reordering these changes the policy."""
-    resolved = []
-    for action, path in rules:
-        try:
-            # Every rule either renders or is fatal. A path that doesn't
-            # exist yet still gets a rule, so nothing is silently dropped.
-            resolved.append((action, vet(path)))
-        except OSError as e:
-            die(f"{e.filename}: {e.strerror} ({action} rule)")
     out = []
-    for action, group in itertools.groupby(resolved, key=lambda r: r[0]):
+    for action, group in itertools.groupby(rules, key=lambda r: r[0]):
         body = "\n".join(f'       (subpath "{p}")' for _, p in group)
         out.append(f"({action} {op}\n{body})")
     return "\n".join(out)
 
-def refuse_denied_cwd(paths: Paths) -> None:
+def refuse_denied_cwd(cwd: str, defaults: list[Directive]) -> None:
     """A working directory the defaults deny reads of yields a sandbox where
     nothing works, since the repo can neither be read nor -- deny-read
     implying deny-write -- written. That is safe but baffling, so say why.
@@ -375,29 +357,33 @@ def refuse_denied_cwd(paths: Paths) -> None:
     Last match wins, exactly as SBPL resolves it. Scanning for any matching
     deny is wrong: every path under $HOME matches the `/Users` deny that the
     `$HOME` allow immediately overrides."""
-    cwd, verdict = paths.cwd, None
-    defaults = [e for d in default_directives(paths) for e in expand(d)]
+    denied = None
     for action, path in rules_for("read", defaults):
-        try:
-            d = vet(path)
-        except OSError:
-            continue  # stanzas() will report it properly in a moment
-        if cwd == d or cwd.startswith(d + "/"):
-            verdict = (action, d)
-    if verdict and verdict[0] == "deny":
-        die(f"refusing to run in ‘{cwd}’: it is inside ‘{verdict[1]}’, which "
+        if cwd == path or cwd.startswith(path + "/"):
+            denied = path if action == "deny" else None
+    if denied:
+        die(f"refusing to run in ‘{cwd}’: it is inside ‘{denied}’, which "
             "is on the read denylist, so nothing there would be readable.")
-
 
 PROFILE = '''(version 1)
 (allow default)
 
 ;; ---- writes: the working directory and scratch space, nothing else ----
 (deny file-write*)
-;; The character devices everything expects to be able to write to. First, so
-;; that a later rule of yours could take one away; nothing in the defaults
-;; matches /dev, so nothing does.
-{device_writes}
+;; The character devices everything expects to be able to write to. Not
+;; subpaths, so a fixed stanza rather than rules. First, so that a later rule
+;; of yours could take one away; nothing in the defaults matches /dev, so
+;; nothing does.
+(allow file-write*
+       (literal "/dev/null")
+       (literal "/dev/zero")
+       (literal "/dev/random")
+       (literal "/dev/urandom")
+       (literal "/dev/dtracehelper")
+       (literal "/dev/tty")
+       (literal "/dev/ptmx")
+       (subpath "/dev/fd")
+       (regex #"^/dev/ttys[0-9]+$"))
 {write_rules}
 
 ;; ---- reads: everything, minus what is worth stealing ----
@@ -425,13 +411,10 @@ RESOLVER = '''
 (allow network-outbound (literal "/private/var/run/mDNSResponder"))'''
 
 def build_profile(paths: Paths, opts: Options) -> str:
-    refuse_denied_cwd(paths)
     directives  = ruleset(paths, opts)
     read_rules  = stanzas(rules_for("read", directives), "file-read*")
     write_rules = stanzas(rules_for("write", directives), "file-write*")
-    profile = PROFILE.format(write_rules=write_rules,
-                             read_rules=read_rules,
-                             device_writes=DEVICE_WRITES)
+    profile = PROFILE.format(write_rules=write_rules, read_rules=read_rules)
     if opts.network:
         return profile + UNIX_SOCKETS + RESOLVER
     return profile + NO_NETWORK + UNIX_SOCKETS
@@ -469,11 +452,8 @@ def check_reasonable(paths: Paths, opts: Options):
     # tools you haven't installed: a path you just typed should exist.
     for action, op, p in opts.directives:
         flag = f"--{action}-{op}"
-        try: r = resolve(p)
-        except OSError as e:
-            die(f"{flag}: {e.filename}: {e.strerror}")
-        if not os.path.exists(r):
-            die(f"{flag}: no such file or directory: {p}")
+        try: os.stat(os.path.expanduser(p))
+        except OSError as e: die(f"{flag}: {e.filename}: {e.strerror}")
         # Laxer: require only the parent, allowing rules on paths not created
         # yet (e.g. --deny-write ./.envrc). Swap for the check above.
         # head = os.path.dirname(os.path.expanduser(p).rstrip("/")) or "."
@@ -483,9 +463,7 @@ def check_reasonable(paths: Paths, opts: Options):
     # Refuse to run in a home/root dir. The whole point is that only one
     # directory is writable, so a home/rootdir is not a useful choice.
     cwd = paths.cwd
-    under_users = cwd == "/Users" or cwd.startswith("/Users/")
-    # "/Users/me/project" has three slashes; "/Users/me" and "/Users" fewer.
-    if cwd == "/" or (under_users and cwd.rstrip("/").count("/") < 3):
+    if cwd in ("/", "/Users") or os.path.dirname(cwd) == "/Users":
         die(f"refusing to run with ‘{cwd}’ writable: cd to a project "
             "directory, not a home directory or the root of the filesystem.")
 
@@ -496,11 +474,11 @@ def main() -> int:
         die(f"{SANDBOX_EXEC} is missing; nothing to sandbox with.")
 
     opts, rest = parse_args(sys.argv[1:])
-    cmd = rest or [os.environ.get("SHELL") or "/bin/bash"]
     paths = find_paths()
     if opts.help:
         sys.stdout.write(USAGE.format(prog=PROG, config_file=paths.config_file))
         return 0
+    cmd = rest or [os.environ.get("SHELL") or "/bin/bash"]
 
     check_reasonable(paths, opts)
     profile = build_profile(paths, opts)

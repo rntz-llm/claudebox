@@ -14,7 +14,6 @@ attack: instead of a VM, it runs a command under a `sandbox-exec` profile that p
 writes only inside the current directory and temporary directories, denies reads of some
 sensitive locations, and denies the network unless you ask for it. See DEVBOX.md.
 
-
 **Things you might use instead:**
 
 - [smol machines](https://www.smolmachines.com/): Same idea - hardware-isolated linux
