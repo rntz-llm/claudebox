@@ -31,16 +31,8 @@ def die(msg) -> NoReturn:
     print(f"{PROG}: {msg}", file=sys.stderr)
     sys.exit(1)
 
-def home() -> str:
-    h = os.environ.get("HOME")
-    if not h: die("HOME is not set.")
-    return h
-
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 LOG = "/usr/bin/log"
-XDG_CONFIG_DIR = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home(), ".config")
-CONFIG_DIR = os.path.join(XDG_CONFIG_DIR, "devbox")
-CONFIG_FILE = os.path.join(CONFIG_DIR, "rules")
 
 USAGE = """\
 usage: {prog} [options] [--] [command [args...]]
@@ -73,13 +65,38 @@ command line.
 
 Option parsing stops at the first non-option argument, so flags meant for the
 command need no --:  {prog} cargo test --release
-""".format(
-    prog=PROG,
-    config_file=CONFIG_FILE,
-)
+"""
 
 
 # -------------------- PATHS --------------------
+# From <unistd.h>; CPython doesn't export it.
+_CS_DARWIN_USER_TEMP_DIR = 65537
+
+@dataclass(frozen=True)
+class Paths:
+    """Where things are on this machine. Found once, by find_paths()."""
+    cwd: str
+    config_dir: str
+    temp_dir: str  # the per-user one, under /private/var/folders
+
+    @property
+    def config_file(self) -> str:
+        return os.path.join(self.config_dir, "rules")
+
+def find_paths() -> Paths:
+    # Rules say `~`, which expanduser() takes from $HOME. An empty one would
+    # turn ~/.ssh into /.ssh, so it is checked here, before any expansion.
+    home = os.environ.get("HOME")
+    if not home: die("HOME is not set.")
+    # Asked of the OS rather than read from $TMPDIR, which may be unset or
+    # point anywhere.
+    temp_dir = os.confstr(_CS_DARWIN_USER_TEMP_DIR)
+    if not temp_dir: die("cannot find the per-user temp directory.")
+    xdg = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
+    return Paths(cwd=os.getcwd(),
+                 config_dir=os.path.join(xdg, "devbox"),
+                 temp_dir=temp_dir)
+
 def resolve(p: str) -> str:
     """Absolute physical path, with every symlink resolved, because Seatbelt
     matches the path an operation resolves to rather than the one it was handed.
@@ -192,7 +209,7 @@ def check_flag_rules(directives: list[Directive]) -> None:
         if not os.path.isdir(head):
             die(f"no such directory: {head} (from {flag})")
 
-def read_config() -> list[Directive]:
+def read_config(config_file: str) -> list[Directive]:
     """`DIRECTIVE PATH` per line, in file order, where DIRECTIVE is one of the
     four --allow/--deny flag names. Blank lines and lines starting with '#'
     are ignored; a missing file is not an error.
@@ -200,12 +217,12 @@ def read_config() -> list[Directive]:
     Only whole-line comments: a '#' is legal in a path, and silently
     truncating someone's rule at one would be the wrong kind of surprise."""
     try:
-        with open(CONFIG_FILE) as f:
+        with open(config_file) as f:
             lines = f.read().splitlines()
     except FileNotFoundError:
         return []
     except OSError as e:
-        die(f"cannot read {CONFIG_FILE}: {e}")
+        die(f"cannot read {config_file}: {e}")
     directives = []
     for n, line in enumerate(lines, 1):
         line = line.strip()
@@ -213,10 +230,10 @@ def read_config() -> list[Directive]:
             continue
         word, _, path = line.partition(" ")
         if word not in DIRECTIVES:
-            die(f"{CONFIG_FILE}:{n}: expected one of "
+            die(f"{config_file}:{n}: expected one of "
                 f"{', '.join(DIRECTIVES)}, got ‘{word}’")
         if not path.strip():
-            die(f"{CONFIG_FILE}:{n}: {word} needs a path")
+            die(f"{config_file}:{n}: {word} needs a path")
         action, _, op = word.partition("-")
         directives.append((action, op, path.strip()))
     return directives
@@ -248,32 +265,19 @@ DEVICE_WRITES = '''(allow file-write*
        (subpath "/dev/fd")
        (regex #"^/dev/ttys[0-9]+$"))'''
 
-# From <unistd.h>; CPython doesn't export it.
-_CS_DARWIN_USER_TEMP_DIR = 65537
-
-def user_temp_dir() -> str:
-    """The per-user temp directory under /private/var/folders, asked of the OS
-    rather than read from $TMPDIR, which may be unset or point anywhere."""
-    d = os.confstr(_CS_DARWIN_USER_TEMP_DIR)
-    if not d: die("cannot find the per-user temp directory.")
-    return d
-
-def default_directives(cwd: str) -> list[Directive]:
+def default_directives(paths: Paths) -> list[Directive]:
     """The built-in policy, lowest precedence. Last match wins."""
-    # If HOME is not set, home() dies and complains. Otherwise ~ resolves to /,
-    # which produces an unhelpful error message about / not being a usable rule.
-    home()
     return [
         ("deny",  "read",  "/Users"),  # other homes stay shut
         ("allow", "read",  "~"),
         # The working directory goes early so that later rules override it: `cd
         # ~/.ssh && devbox` leaves ~/.ssh shut rather than quietly reopening it.
-        ("allow", "write", cwd),
+        ("allow", "write", paths.cwd),
 
         # Scratch space. Not all of /private/var/folders: beside the user temp
         # dir, C/ holds per-user caches that unsandboxed processes trust.
         # /tmp and /var/tmp are world-writable already.
-        ("allow", "write", user_temp_dir()),
+        ("allow", "write", paths.temp_dir),
         ("allow", "write", "/private/tmp"),
         ("allow", "write", "/private/var/tmp"),
 
@@ -328,14 +332,14 @@ def default_directives(cwd: str) -> list[Directive]:
         ("deny",  "read",  "~/Library/Caches/BraveSoftware"),
 
         # Which paths are protected is itself a hint worth not handing over.
-        ("deny",  "read",  CONFIG_DIR),
+        ("deny",  "read",  paths.config_dir),
 
         # Repo-supplied code that can edit these gets to run commands later,
         # outside the sandbox, the next time you touch the repo with git:
         # core.fsmonitor, core.sshCommand and diff.*.textconv all execute.
         # Denying the write only: git has to be able to read its own config.
-        ("deny",  "write", f"{cwd}/.git/hooks"),
-        ("deny",  "write", f"{cwd}/.git/config"),
+        ("deny",  "write", f"{paths.cwd}/.git/hooks"),
+        ("deny",  "write", f"{paths.cwd}/.git/config"),
     ]
 
 def expand(d: Directive) -> list[Directive]:
@@ -352,10 +356,11 @@ def expand(d: Directive) -> list[Directive]:
     if (action, op) == ("deny", "read"): return [d, ("deny", "write", path)]
     return [d]
 
-def ruleset(cwd: str, opts: Options) -> list[Directive]:
+def ruleset(paths: Paths, opts: Options) -> list[Directive]:
     """The whole policy as one ordered stream: defaults, then your config
     file, then your command line, each able to override what came before."""
-    ds = default_directives(cwd) + read_config() + opts.directives
+    ds = (default_directives(paths) + read_config(paths.config_file)
+          + opts.directives)
     return [e for d in ds for e in expand(d)]
 
 def rules_for(op: str, directives: list[Directive]) -> list[Rule]:
@@ -379,7 +384,7 @@ def stanzas(rules: list[Rule], op: str) -> str:
         out.append(f"({action} {op}\n{body})")
     return "\n".join(out)
 
-def refuse_denied_cwd(cwd: str) -> None:
+def refuse_denied_cwd(paths: Paths) -> None:
     """A working directory the defaults deny reads of yields a sandbox where
     nothing works, since the repo can neither be read nor -- deny-read
     implying deny-write -- written. That is safe but baffling, so say why.
@@ -391,8 +396,8 @@ def refuse_denied_cwd(cwd: str) -> None:
     Last match wins, exactly as SBPL resolves it. Scanning for any matching
     deny is wrong: every path under $HOME matches the `/Users` deny that the
     `$HOME` allow immediately overrides."""
-    verdict = None
-    defaults = [e for d in default_directives(cwd) for e in expand(d)]
+    cwd, verdict = paths.cwd, None
+    defaults = [e for d in default_directives(paths) for e in expand(d)]
     for action, path in rules_for("read", defaults):
         try:
             d = vet(path)
@@ -440,9 +445,9 @@ UNIX_SOCKETS = '''
 RESOLVER = '''
 (allow network-outbound (literal "/private/var/run/mDNSResponder"))'''
 
-def build_profile(cwd: str, opts: Options) -> str:
-    refuse_denied_cwd(cwd)
-    directives  = ruleset(cwd, opts)
+def build_profile(paths: Paths, opts: Options) -> str:
+    refuse_denied_cwd(paths)
+    directives  = ruleset(paths, opts)
     read_rules  = stanzas(rules_for("read", directives), "file-read*")
     write_rules = stanzas(rules_for("write", directives), "file-write*")
     profile = PROFILE.format(write_rules=write_rules,
@@ -495,18 +500,18 @@ def main() -> int:
 
     opts, rest = parse_args(sys.argv[1:])
     cmd = rest or [os.environ.get("SHELL") or "/bin/bash"]
+    paths = find_paths()
     if opts.help:
-        sys.stdout.write(USAGE)
+        sys.stdout.write(USAGE.format(prog=PROG, config_file=paths.config_file))
         return 0
     # Check for --allow/deny flags on nonexistent paths (likely typos).
     check_flag_rules(opts.directives)
 
-    cwd = os.getcwd()
     # Refuse to run in a homedir or root dir; a dangerous mistake.
-    refuse_unreasonable_cwd(cwd)
-    vet(cwd)  # the profile will quote it; fail now if it can't be quoted
+    refuse_unreasonable_cwd(paths.cwd)
+    vet(paths.cwd)  # the profile will quote it; fail now if it can't be quoted
 
-    profile = build_profile(cwd, opts)
+    profile = build_profile(paths, opts)
     if opts.print_profile:
         print(profile)
         return 0
