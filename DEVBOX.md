@@ -24,9 +24,11 @@ devbox --print-profile            # see exactly what the profile says
 Writes to current directory; reads anywhere; no network. Exceptions/details:
 
 - **Writes**: The current directory, your per-user temp directory (`getconf
-  DARWIN_USER_TEMP_DIR`), `/tmp`, `/var/tmp`, and the usual writable character
-  devices. Not `.git/config` or `.git/hooks` either, even though they are inside
-  the writable directory - see below.
+  DARWIN_USER_TEMP_DIR`, even if `$TMPDIR` points elsewhere), `/tmp`,
+  `/var/tmp`, and the usual writable character devices. Not `.git/config` or
+  `.git/hooks` either, even though they are inside the writable directory - see
+  below. `/tmp` is shared with your unsandboxed programs, so sandboxed code can
+  delete or rename their files there, `ssh-agent`'s socket included.
 
 - **Reads**: Everything except some well-known private files: `~/.ssh`,
   `~/.gnupg`, `~/.aws`, `~/.kube`, `~/.docker`, `~/.netrc`, `~/.npmrc`,
@@ -37,7 +39,8 @@ Writes to current directory; reads anywhere; no network. Exceptions/details:
   is a copy of your home directory. `stat` is permitted everywhere, so
   path-walking still works.
 
-- **IP networking**: None, unless you pass `--network=yes`.
+- **IP networking**: None, unless you pass `--network=yes`. That opens
+  localhost too: Docker, databases, Chrome's debugging port.
 
 - **Unix sockets**: syslog's, plus the DNS resolver's with `--network=yes`.
   Nothing else: sockets in shared directories reach programs that run commands
@@ -75,7 +78,9 @@ anyway. Not worth a sandbox that breaks every autumn.
 - **Starting a process outside the sandbox.** Children inherit the profile, but
   `open -a`, `launchctl submit` and Apple Events ask a system service to do the
   work, and what *it* starts is not your child. Closing this needs the
-  mach-service allowlist described above, so it stays open.
+  mach-service allowlist described above, so it stays open. Likewise the
+  `TIOCSTI` ioctl, which types commands into your terminal for your shell to
+  run once devbox exits.
 
 - **Daemons reading files on your behalf.** The file rules bind your process.
   The login keychain is reached through `securityd`, preferences through
@@ -83,15 +88,21 @@ anyway. Not worth a sandbox that breaks every autumn.
   Try `git credential-osxkeychain get` before assuming your git credentials are
   out of reach.
 
-- **Your environment.** It passes through as-is, so whatever your shell
-  exported - `GITHUB_TOKEN`, `ANTHROPIC_API_KEY`, `AWS_SECRET_ACCESS_KEY` - is
-  there inside. Launch from a clean shell if it matters.
+- **Secrets that aren't files.** Your environment passes through as-is, so
+  whatever your shell exported - `GITHUB_TOKEN`, `ANTHROPIC_API_KEY`,
+  `AWS_SECRET_ACCESS_KEY` - is there inside. Launching from a clean shell
+  doesn't hide other processes' environments, which `ps -E` shows. The
+  clipboard is readable too.
 
 - **Damage inside the working directory.** The repo is writable by design. The
   two files your unsandboxed git would execute from - `.git/config`, via
   `core.fsmonitor`, `core.sshCommand` and `diff.*.textconv`, and `.git/hooks` -
-  are denied, but `.envrc`, `Makefile` and `package.json` scripts are not, and
-  your own tools run those later.
+  are denied, but only those: `.git` itself can probably be swapped out, as can
+  a worktree's or submodule's `.git` file, and `.git/modules/*/config` and
+  nested repos are writable. So are `.envrc`, `Makefile`, `package.json`
+  scripts and in-tree hook directories (husky, pre-commit, lefthook), and your
+  own tools run those later. Run devbox from the repo root: from `~/src`, every
+  repo in it is exposed.
 
 - **Links are not an escape, but they can surprise you.** Rules match the path
   a file resolves to, so a symlink pointing at `~/.ssh` gains nothing, and
@@ -113,8 +124,15 @@ One file, one directive per line, `#` for a comment:
 # ~/.config/devbox/rules
 deny-read   ~/work/customer-data
 allow-write ~/.cargo/registry
-allow-read  ~/.claude            # I want this one readable after all
+# I want this one readable after all
+allow-read  ~/.claude
 ```
+
+Comments are whole lines only: a later `#` is part of the path. Config paths
+needn't exist, so a typo silently does nothing; check `--print-profile`.
+Relative paths resolve against the working directory. Command-line paths must
+exist. Write paths in their on-disk case: matching is probably case-sensitive
+even where the disk isn't.
 
 The four directives are the four flags: `--allow-read`, `--deny-read`,
 `--allow-write`, `--deny-write`, all repeatable and all taking a path.
@@ -146,8 +164,10 @@ what lets `.git/config` stay readable while being unwritable, and `allow-read`
 grants no writes, which is what keeps `~/Library/Caches` readable but not
 writable until you ask.
 
-One consequence worth knowing: a broad `--allow-write` is also a broad
-`--allow-read`. `--allow-write ~` reopens every credential deny.
+**Your rules silently override the built-in ones**, and a broad
+`--allow-write` is also a broad `--allow-read`. `--allow-write ~` reopens every
+credential deny; `--allow-write .` reopens `.git/config` and `.git/hooks`;
+`--allow-write ~/.config` lets sandboxed code rewrite your devbox rules.
 
 The working directory is allowed early, ahead of the credential denies, so
 `cd ~/.ssh && devbox` leaves `~/.ssh` shut rather than quietly reopening it —
@@ -158,8 +178,9 @@ contained, so it does not get to name its own exceptions.
 
 ## When something won't run
 
-Almost always a write. `--why` runs the command and then prints the denials it
-caused, which names the path:
+Usually a write. `--why` runs the command and then prints the denials since it
+started, which names the path. They include other programs' denials, and Ctrl-C
+loses the report.
 
 ```sh
 devbox --why cargo build
@@ -183,7 +204,21 @@ Three cases come up often:
   keep it local with `GOCACHE=$PWD/.gocache`. Gradle, Maven, pip, SwiftPM and
   Xcode's DerivedData all have the same shape.
 
-If you reach for the same flag twice, put it in `~/.config/devbox/allow-write`.
+Other causes:
+
+- **Unix sockets**, all denied, even a tool's own: watchman, turbo and nx
+  daemons, Python `multiprocessing` managers.
+- **Localhost** is off with the network: Gradle and Bazel daemons, test
+  servers.
+- **`.git/config`** isn't writable: `git push -u`, `git remote add`, husky's
+  install step. Run those outside.
+- **Clang/Swift module cache** is probably not writable, breaking `-fmodules`
+  and Swift builds.
+- **Unreadable dev directories**: `~/Library/Java`,
+  `~/Library/org.swift.swiftpm`, `~/Library/Application
+  Support/{pip,pypoetry,Coursier}`. Use `--allow-read`.
+
+If you reach for the same flag twice, put it in `~/.config/devbox/rules`.
 
 ## Caveats
 
