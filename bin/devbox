@@ -222,17 +222,17 @@ def read_config() -> list[Directive]:
 
 
 # -------------------- POLICY --------------------
-# Reads are allowed by default and taken away by name; writes are denied by
-# default and given back by name. The asymmetry is deliberate. "Files my dev
-# environment reads" is long, personal and open-ended, so enumerating it
-# produces a sandbox that breaks constantly and stops being used; "files that
-# are secrets" is short and close to universal. Writes are the opposite: almost
-# nothing legitimately writes outside the repo and its caches, so enumerating
-# those costs little and catches a lot.
 #
-# The cost of this shape is that a secret somewhere nobody listed stays
-# readable. With the network off by default that is staged exfiltration rather
-# than exfiltration, which is the trade being made. See DEVBOX.md.
+# Reads allowed by default; writes denied by default. "Files my dev environment
+# reads" is long, personal and open-ended, so enumerating it produces a sandbox
+# that breaks constantly and stops being used; "files that are secrets" is short
+# and close to universal. Writes are the opposite: almost nothing legitimately
+# writes outside the repo and its caches, so enumerating those costs little and
+# catches a lot.
+#
+# The downside is that a secret nobody deny-listed stays readable. With the
+# network off by default that is staged rather than immediate exfiltration,
+# which is the trade being made. See DEVBOX.md.
 
 # The character devices everything expects to be able to write to. Not
 # subpaths, so this is a fixed stanza rather than a rule.
@@ -257,32 +257,16 @@ def user_temp_dir() -> str:
     if not d: die("cannot find the per-user temp directory.")
     return d
 
-def expand(d: Directive) -> list[Directive]:
-    """A directive and whatever it implies, at the same position.
-
-    Writable-but-not-readable is not a state worth being able to express: it
-    breaks every tool that opens O_RDWR, and it doesn't even buy secrecy,
-    because `mv ~/.aws/creds ./stolen` needs write on both ends and read on
-    neither. So allow-write carries allow-read, and -- its contrapositive --
-    deny-read carries deny-write. Together they keep `writable implies
-    readable` true at every point in the stream. The other two directives
-    imply nothing: .git/config must stay readable while being unwritable."""
-    action, op, path = d
-    if (action, op) == ("allow", "write"):
-        return [d, ("allow", "read", path)]
-    if (action, op) == ("deny", "read"):
-        return [d, ("deny", "write", path)]
-    return [d]
-
 def default_directives(cwd: str) -> list[Directive]:
-    """The built-in policy, lowest precedence. Last match wins.
-
-    The working directory is allowed early, ahead of the credential denies,
-    so that those override it: `cd ~/.ssh && devbox` leaves ~/.ssh shut
-    rather than quietly reopening it."""
+    """The built-in policy, lowest precedence. Last match wins."""
+    # If HOME is not set, home() dies and complains. Otherwise ~ resolves to /,
+    # which produces an unhelpful error message about / not being a usable rule.
+    home()
     return [
         ("deny",  "read",  "/Users"),  # other homes stay shut
         ("allow", "read",  "~"),
+        # The working directory goes early so that later rules override it: `cd
+        # ~/.ssh && devbox` leaves ~/.ssh shut rather than quietly reopening it.
         ("allow", "write", cwd),
 
         # Scratch space. Not all of /private/var/folders: beside the user temp
@@ -322,8 +306,8 @@ def default_directives(cwd: str) -> list[Directive]:
         ("deny",  "read",  "~/.config/anthropic"),
         ("deny",  "read",  "~/.local/share/keyrings"),
 
-        # ~/Library is denied wholesale: it is the highest secret density on
-        # the machine (Cookies alone are session tokens for everything you are
+        # ~/Library is denied wholesale: it is the highest secret density on the
+        # machine (Cookies alone are session tokens for everything you are
         # logged in to) and the least enumerable. The dev-relevant subtrees are
         # given back -- an allowlist inside a denylist, worth the complication
         # just this once.
@@ -352,6 +336,20 @@ def default_directives(cwd: str) -> list[Directive]:
         ("deny",  "write", f"{cwd}/.git/hooks"),
         ("deny",  "write", f"{cwd}/.git/config"),
     ]
+
+def expand(d: Directive) -> list[Directive]:
+    """A directive and whatever it implies, at the same position.
+
+    Writable-but-not-readable is not a state worth being able to express: it
+    breaks every tool that opens O_RDWR, and it doesn't buy secrecy, because `mv
+    ~/.aws/creds ./stolen` needs write on both ends and read on neither. To
+    ensure `writable implies readable` is true, we make allow-write imply
+    allow-read, and deny-read imply deny-write.
+    """
+    action, op, path = d
+    if (action, op) == ("allow", "write"): return [d, ("allow", "read", path)]
+    if (action, op) == ("deny", "read"): return [d, ("deny", "write", path)]
+    return [d]
 
 def ruleset(cwd: str, opts: Options) -> list[Directive]:
     """The whole policy as one ordered stream: defaults, then your config
