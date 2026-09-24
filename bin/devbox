@@ -79,7 +79,7 @@ class Paths:
     def config_file(self) -> str:
         return os.path.join(self.config_dir, "rules")
 
-_CS_DARWIN_USER_TEMP_DIR = 65537 # From <unistd.h>; CPython doesn't export it.
+_CS_DARWIN_USER_TEMP_DIR = 65537  # From <unistd.h>; CPython doesn't export it.
 
 def find_paths() -> Paths:
     # Rules say `~`, which expanduser() takes from $HOME. An empty one would
@@ -462,6 +462,33 @@ def run_with_why(profile: str, cmd: list[str]) -> int:
           file=sys.stderr)
     return status
 
+def check_reasonable(paths: Paths, opts: Options):
+    """Die if the user has requested something unreasonable."""
+    # Check --allow/deny flags for nonexistent paths. These are likely typos,
+    # possibly dangerous. This is stricter than the config files, which may name
+    # tools you haven't installed: a path you just typed should exist.
+    for action, op, p in opts.directives:
+        flag = f"--{action}-{op}"
+        try: r = resolve(p)
+        except OSError as e:
+            die(f"{flag}: {e.filename}: {e.strerror}")
+        if not os.path.exists(r):
+            die(f"{flag}: no such file or directory: {p}")
+        # Laxer: require only the parent, allowing rules on paths not created
+        # yet (e.g. --deny-write ./.envrc). Swap for the check above.
+        # head = os.path.dirname(os.path.expanduser(p).rstrip("/")) or "."
+        # if not os.path.isdir(head):
+        #     die(f"{flag}: no such directory: {head}")
+
+    # Refuse to run in a home/root dir. The whole point is that only one
+    # directory is writable, so a home/rootdir is not a useful choice.
+    cwd = paths.cwd
+    under_users = cwd == "/Users" or cwd.startswith("/Users/")
+    # "/Users/me/project" has three slashes; "/Users/me" and "/Users" fewer.
+    if cwd == "/" or (under_users and cwd.rstrip("/").count("/") < 3):
+        die(f"refusing to run with ‘{cwd}’ writable: cd to a project "
+            "directory, not a home directory or the root of the filesystem.")
+
 def main() -> int:
     if os.uname().sysname != "Darwin":
         die(f"macOS only -- sandbox-exec doesn't exist on {os.uname().sysname}.")
@@ -475,36 +502,7 @@ def main() -> int:
         sys.stdout.write(USAGE.format(prog=PROG, config_file=paths.config_file))
         return 0
 
-    # Check --allow/deny flags for nonexistent paths. These are likely typos,
-    # possibly dangerous. This is stricter than the config files, which may name
-    # tools you haven't installed: a path you just typed should exist, or at
-    # least its parent should.
-    for action, op, p in opts.directives:
-        flag = f"--{action}-{op}"
-        try: resolve(p)
-        except OSError as e:
-            die(f"{flag}: {e.filename}: {e.strerror}")
-        # TODO FIXME: should we really accept things whose parent exist but
-        # don't exist themselves?
-        #
-        # A path you just typed should at least have a parent that exists. The
-        # defaults and the config files are exempt -- they may name tools you
-        # don't have -- but here a typo would allow or deny the wrong thing,
-        # silently, and one stat catches it.
-        head = os.path.dirname(os.path.expanduser(p).rstrip("/")) or "."
-        if not os.path.isdir(head):
-            die(f"{flag}: no such directory: {head}")
-
-    # Refuse to run in a homedir or root dir; a dangerous mistake.
-    #
-    # The whole point is that one directory is writable, so a home directory
-    # or the root of the filesystem is not a useful choice: cd to a project.
-    under_users = paths.cwd == "/Users" or paths.cwd.startswith("/Users/")
-    # "/Users/me/project" has three slashes; "/Users/me" and "/Users" fewer.
-    if paths.cwd == "/" or (under_users and paths.cwd.rstrip("/").count("/") < 3):
-        die(f"refusing to run with ‘{paths.cwd}’ writable: cd to a project "
-            "directory, not a home directory or the root of the filesystem.")
-
+    check_reasonable(paths, opts)
     profile = build_profile(paths, opts)
     if opts.print_profile:
         print(profile)
