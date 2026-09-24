@@ -69,19 +69,17 @@ command need no --:  {prog} cargo test --release
 
 
 # -------------------- PATHS --------------------
-# From <unistd.h>; CPython doesn't export it.
-_CS_DARWIN_USER_TEMP_DIR = 65537
-
 @dataclass(frozen=True)
 class Paths:
-    """Where things are on this machine. Found once, by find_paths()."""
+    """Where things are on this machine."""
     cwd: str
     config_dir: str
     temp_dir: str  # the per-user one, under /private/var/folders
-
     @property
     def config_file(self) -> str:
         return os.path.join(self.config_dir, "rules")
+
+_CS_DARWIN_USER_TEMP_DIR = 65537 # From <unistd.h>; CPython doesn't export it.
 
 def find_paths() -> Paths:
     # Rules say `~`, which expanduser() takes from $HOME. An empty one would
@@ -191,10 +189,11 @@ def parse_args(argv: list[str]) -> tuple[Options, list[str]]:
     return opts, argv[i:]
 
 def check_flag_rules(directives: list[Directive]) -> None:
-    """Vet the paths you asked for up front. An unresolvable one would
-    otherwise be dropped and reappear later as a mysterious denial. Stricter
-    than the config files, which may name tools you haven't installed: a path
-    you just typed should exist, or at least its parent should."""
+    """Vet the paths you asked for up front. An unresolvable one would otherwise
+    be dropped and reappear later as a mysterious denial. Stricter than the
+    config files, which may name tools you haven't installed: a path you just
+    typed should exist, or at least its parent should.
+    """
     for action, op, p in directives:
         flag = f"--{action}-{op}"
         try:
