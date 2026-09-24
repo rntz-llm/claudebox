@@ -332,9 +332,10 @@ def resolved(ds: list[Directive]) -> list[Directive]:
 def ruleset(paths: Paths, opts: Options) -> list[Directive]:
     """The whole policy as one ordered stream: defaults, then your config
     file, then your command line, each able to override what came before."""
-    defaults = resolved(default_directives(paths))
-    refuse_denied_cwd(paths.cwd, defaults)
-    return defaults + resolved(read_config(paths.config_file) + opts.directives)
+    directives = resolved(default_directives(paths)
+                          + read_config(paths.config_file) + opts.directives)
+    refuse_denied_cwd(paths.cwd, directives)
+    return directives
 
 def rules_for(op: str, directives: list[Directive]) -> list[Rule]:
     return [(action, path) for action, o, path in directives if o == op]
@@ -349,25 +350,23 @@ def stanzas(rules: list[Rule], op: str) -> str:
         out.append(f"({action} {op}\n{body})")
     return "\n".join(out)
 
-def refuse_denied_cwd(cwd: str, defaults: list[Directive]) -> None:
-    """A working directory the defaults deny reads of yields a sandbox where
+def refuse_denied_cwd(cwd: str, directives: list[Directive]) -> None:
+    """A working directory the policy denies reads of yields a sandbox where
     nothing works, since the repo can neither be read nor -- deny-read
     implying deny-write -- written. That is safe but baffling, so say why.
     Advisory only: the profile would be correct either way.
-
-    Only the defaults are policed; denying your own repo from the config file
-    or the command line is a thing you are allowed to mean.
 
     Last match wins, exactly as SBPL resolves it. Scanning for any matching
     deny is wrong: every path under $HOME matches the `/Users` deny that the
     `$HOME` allow immediately overrides."""
     denied = None
-    for action, path in rules_for("read", defaults):
+    for action, path in rules_for("read", directives):
         if cwd == path or cwd.startswith(path + "/"):
             denied = path if action == "deny" else None
     if denied:
         die(f"refusing to run in ‘{cwd}’: it is inside ‘{denied}’, which "
-            "is on the read denylist, so nothing there would be readable.")
+            "is denied reads, so nothing there would be readable. To run "
+            "there anyway, add --allow-write .")
 
 PROFILE = '''(version 1)
 (allow default)
