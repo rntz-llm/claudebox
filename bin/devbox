@@ -518,7 +518,8 @@ def main() -> int:
 
     if not opts.why:
         os.execv(SANDBOX_EXEC, [SANDBOX_EXEC, "-p", profile] + cmd)
-    return run_with_why(profile, cmd)
+    else:
+        return run_with_why(profile, cmd)
 
 if __name__ == "__main__":
     sys.exit(main())
