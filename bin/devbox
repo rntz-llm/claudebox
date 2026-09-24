@@ -387,7 +387,12 @@ PROFILE = '''(version 1)
 ;; ---- reads: everything, minus what is worth stealing ----
 {read_rules}
 ;; Metadata everywhere regardless, so that stat() and path-walking work.
-(allow file-read-metadata)'''
+(allow file-read-metadata)
+
+;; ---- terminal ----
+;; TIOCSTI, _IOW('t', 114, char), pushes bytes into your terminal's input
+;; queue, which your shell reads and runs, unsandboxed, once devbox exits.
+(deny file-ioctl (ioctl-command #x80017472))'''
 
 NO_NETWORK = '''
 
