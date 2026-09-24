@@ -177,8 +177,7 @@ contained, so it does not get to name its own exceptions.
 ## When something won't run
 
 Usually a write. `--why` runs the command and then prints the denials since it
-started, which names the path. They include other programs' denials, and Ctrl-C
-loses the report.
+started, which names the path. They may include other programs' denials.
 
 ```sh
 devbox --why cargo build

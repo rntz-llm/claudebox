@@ -14,6 +14,7 @@ decides what the sandbox means.
 import errno
 import itertools
 import os
+import signal
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -425,7 +426,12 @@ def run_with_why(profile: str, cmd: list[str]) -> int:
     because stream takes a moment to attach and would miss the denials at
     startup, which are the ones you most want to see."""
     started = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    status = subprocess.call([SANDBOX_EXEC, "-p", profile] + cmd)
+    # Ctrl-C reaches the child through the terminal; the report should survive
+    # it, so only the child gets the default action.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    status = subprocess.call(
+        [SANDBOX_EXEC, "-p", profile] + cmd,
+        preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
     print(f"{PROG}: sandbox denials since {started}:", file=sys.stderr)
     # A denial is logged as e.g.
     #   Sandbox: bash(123) deny(1) file-read-data /Users/me/.ssh/id_ed25519
@@ -437,11 +443,12 @@ def run_with_why(profile: str, cmd: list[str]) -> int:
          "--predicate", 'eventMessage CONTAINS "deny("'],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
     ).stdout
-    denials = [line for line in out.splitlines()
-               if not line.startswith("Timestamp")]
+    # " deny(" skips the headers, one of which quotes the predicate.
+    denials = [line for line in out.splitlines() if " deny(" in line]
     print("\n".join(denials) if denials else f"{PROG}: none logged.",
           file=sys.stderr)
-    return status
+    # As a shell reports a signal death.
+    return 128 - status if status < 0 else status
 
 def check_reasonable(paths: Paths, opts: Options):
     """Die if the user has requested something unreasonable."""
