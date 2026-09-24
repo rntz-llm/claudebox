@@ -129,8 +129,7 @@ allow-read  ~/.claude
 Comments are whole lines only: a later `#` is part of the path. Config paths
 needn't exist, so a typo silently does nothing; check `--print-profile`.
 Relative paths resolve against the working directory. Command-line paths must
-exist. Write paths in their on-disk case: matching is probably case-sensitive
-even where the disk isn't.
+exist.
 
 The four directives are the four flags: `--allow-read`, `--deny-read`,
 `--allow-write`, `--deny-write`, all repeatable and all taking a path.
