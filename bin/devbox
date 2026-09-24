@@ -14,6 +14,7 @@ decides what the sandbox means.
 import errno
 import itertools
 import os
+import pwd
 import signal
 import subprocess
 import sys
@@ -458,18 +459,22 @@ def check_reasonable(paths: Paths, opts: Options):
         flag = f"--{action}-{op}"
         try: os.stat(os.path.expanduser(p))
         except OSError as e: die(f"{flag}: {e.filename}: {e.strerror}")
-        # Laxer: require only the parent, allowing rules on paths not created
-        # yet (e.g. --deny-write ./.envrc). Swap for the check above.
-        # head = os.path.dirname(os.path.expanduser(p).rstrip("/")) or "."
-        # if not os.path.isdir(head):
-        #     die(f"{flag}: no such directory: {head}")
 
     # Refuse to run in a home/root dir. The whole point is that only one
     # directory is writable, so a home/rootdir is not a useful choice.
     cwd = paths.cwd
-    if cwd in ("/", "/Users") or os.path.dirname(cwd) == "/Users":
+    homes = {os.path.realpath(h) for h in
+             (os.path.expanduser("~"), pwd.getpwuid(os.getuid()).pw_dir)}
+    if cwd in ("/", "/Users") or os.path.dirname(cwd) == "/Users" \
+            or any(h == cwd or h.startswith(cwd + "/") for h in homes):
         die(f"refusing to run with ‘{cwd}’ writable: cd to a project "
             "directory, not a home directory or the root of the filesystem.")
+    # Only <cwd>/.git is protected, so from e.g. ~/src every repo is exposed.
+    if not os.path.exists(os.path.join(cwd, ".git")) and any(
+            os.path.exists(os.path.join(cwd, d, ".git")) for d in os.listdir(cwd)):
+        print(f"{PROG}: warning: ‘{cwd}’ holds git repos but isn't one; their "
+              ".git directories are writable. Run from a repo root.",
+              file=sys.stderr)
 
 def main() -> int:
     if os.uname().sysname != "Darwin":

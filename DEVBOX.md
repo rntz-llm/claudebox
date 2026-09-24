@@ -102,7 +102,7 @@ anyway. Not worth a sandbox that breaks every autumn.
   nested repos are writable. So are `.envrc`, `Makefile`, `package.json`
   scripts and in-tree hook directories (husky, pre-commit, lefthook), and your
   own tools run those later. Run devbox from the repo root: from `~/src`, every
-  repo in it is exposed.
+  repo in it is exposed, and devbox warns.
 
 - **Links are not an escape, but they can surprise you.** Rules match the path
   a file resolves to, so a symlink pointing at `~/.ssh` gains nothing, and
