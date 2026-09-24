@@ -325,20 +325,33 @@ def expand(d: Directive) -> list[Directive]:
     if (action, op) == ("deny", "read"): return [d, ("deny", "write", path)]
     return [d]
 
+def rules_for(op: str, directives: list[Directive]) -> list[Rule]:
+    return [(action, path) for action, o, path in directives if o == op]
+
+def refuse_denied_cwd(cwd: str, directives: list[Directive]) -> None:
+    """Check if working directory is deny-read (hence also deny-write) under
+    last-match-wins; this is basically useless, so die with an error message.
+    """
+    denied = None
+    for action, path in rules_for("read", directives):
+        if cwd == path or cwd.startswith(path + "/"):
+            denied = path if action == "deny" else None
+    if denied is not None:
+        die(f"refusing to run in ‘{cwd}’: it is inside ‘{denied}’, which "
+            "is denied reads, so nothing there would be readable. To run "
+            "there anyway, add --allow-read . or --allow-write .")
+
 def resolved(ds: list[Directive]) -> list[Directive]:
     """Vet each path, then expand. Every rule either renders or is fatal."""
     return [e for action, op, p in ds for e in expand((action, op, vet(p)))]
 
 def ruleset(paths: Paths, opts: Options) -> list[Directive]:
-    """The whole policy as one ordered stream: defaults, then your config
-    file, then your command line, each able to override what came before."""
+    """The whole policy as one ordered list: defaults, then your config file,
+    then your command line, each able to override what came before."""
     directives = resolved(default_directives(paths)
                           + read_config(paths.config_file) + opts.directives)
     refuse_denied_cwd(paths.cwd, directives)
     return directives
-
-def rules_for(op: str, directives: list[Directive]) -> list[Rule]:
-    return [(action, path) for action, o, path in directives if o == op]
 
 def stanzas(rules: list[Rule], op: str) -> str:
     """Render rules as SBPL, one stanza per run of like actions. The order is
@@ -349,24 +362,6 @@ def stanzas(rules: list[Rule], op: str) -> str:
         body = "\n".join(f'       (subpath "{p}")' for _, p in group)
         out.append(f"({action} {op}\n{body})")
     return "\n".join(out)
-
-def refuse_denied_cwd(cwd: str, directives: list[Directive]) -> None:
-    """A working directory the policy denies reads of yields a sandbox where
-    nothing works, since the repo can neither be read nor -- deny-read
-    implying deny-write -- written. That is safe but baffling, so say why.
-    Advisory only: the profile would be correct either way.
-
-    Last match wins, exactly as SBPL resolves it. Scanning for any matching
-    deny is wrong: every path under $HOME matches the `/Users` deny that the
-    `$HOME` allow immediately overrides."""
-    denied = None
-    for action, path in rules_for("read", directives):
-        if cwd == path or cwd.startswith(path + "/"):
-            denied = path if action == "deny" else None
-    if denied:
-        die(f"refusing to run in ‘{cwd}’: it is inside ‘{denied}’, which "
-            "is denied reads, so nothing there would be readable. To run "
-            "there anyway, add --allow-write .")
 
 PROFILE = '''(version 1)
 (allow default)
