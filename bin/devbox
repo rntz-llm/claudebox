@@ -460,6 +460,10 @@ def check_reasonable(paths: Paths, opts: Options):
         try: os.stat(os.path.expanduser(p))
         except OSError as e: die(f"{flag}: {e.filename}: {e.strerror}")
 
+    # A sandbox can't apply another.
+    if os.environ.get("DEVBOX") and not opts.print_profile:
+        die("already inside devbox ($DEVBOX is set).")
+
     # Refuse to run in a home/root dir. The whole point is that only one
     # directory is writable, so a home/rootdir is not a useful choice.
     cwd = paths.cwd
@@ -495,7 +499,8 @@ def main() -> int:
         print(profile)
         return 0
 
-    # Marks the shell as sandboxed for anyone who wants to say so in a prompt.
+    # Marks the shell as sandboxed for anyone who wants to say so in a prompt,
+    # and for check_reasonable.
     os.environ["DEVBOX"] = "1"
 
     # "--", or a command starting with "-" would be sandbox-exec's option.
