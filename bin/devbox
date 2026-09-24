@@ -205,8 +205,8 @@ def read_config(config_file: str) -> list[Directive]:
         line = line.lstrip()
         if not line or line.startswith("#"):
             continue
-        word, _, path = line.partition(" ")
-        path = path.lstrip()
+        word, *rest = line.split(None, 1)
+        path = rest[0] if rest else ""
         if word not in DIRECTIVES:
             die(f"{config_file}:{n}: expected one of "
                 f"{', '.join(DIRECTIVES)}, got ‘{word}’")
