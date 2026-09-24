@@ -462,15 +462,6 @@ def run_with_why(profile: str, cmd: list[str]) -> int:
           file=sys.stderr)
     return status
 
-def refuse_unreasonable_cwd(cwd: str) -> None:
-    """The whole point is that one directory is writable, so a home directory
-    or the root of the filesystem is not a useful choice: cd to a project."""
-    under_users = cwd == "/Users" or cwd.startswith("/Users/")
-    # "/Users/me/project" has three slashes; "/Users/me" and "/Users" fewer.
-    if cwd == "/" or (under_users and cwd.rstrip("/").count("/") < 3):
-        die(f"refusing to run with ‘{cwd}’ writable: cd to a project "
-            "directory, not a home directory or the root of the filesystem.")
-
 def main() -> int:
     if os.uname().sysname != "Darwin":
         die(f"macOS only -- sandbox-exec doesn't exist on {os.uname().sysname}.")
@@ -505,8 +496,14 @@ def main() -> int:
             die(f"{flag}: no such directory: {head}")
 
     # Refuse to run in a homedir or root dir; a dangerous mistake.
-    refuse_unreasonable_cwd(paths.cwd)
-    vet(paths.cwd)  # the profile will quote it; fail now if it can't be quoted
+    #
+    # The whole point is that one directory is writable, so a home directory
+    # or the root of the filesystem is not a useful choice: cd to a project.
+    under_users = paths.cwd == "/Users" or paths.cwd.startswith("/Users/")
+    # "/Users/me/project" has three slashes; "/Users/me" and "/Users" fewer.
+    if paths.cwd == "/" or (under_users and paths.cwd.rstrip("/").count("/") < 3):
+        die(f"refusing to run with ‘{paths.cwd}’ writable: cd to a project "
+            "directory, not a home directory or the root of the filesystem.")
 
     profile = build_profile(paths, opts)
     if opts.print_profile:
