@@ -230,9 +230,9 @@ def read_config(config_file: str) -> list[Directive]:
 # writes outside the repo and its caches, so enumerating those costs little and
 # catches a lot.
 #
-# The downside is that a secret nobody deny-listed stays readable. With the
-# network off by default that is staged rather than immediate exfiltration,
-# which is the trade being made. See DEVBOX.md.
+# The downside is that a secret nobody deny-listed stays readable, and turning
+# the network off barely slows its exfiltration: `open "https://..."` still
+# works. See DEVBOX.md.
 
 def default_directives(paths: Paths) -> list[Directive]:
     """The built-in policy, lowest precedence. Last match wins."""
