@@ -31,7 +31,8 @@ Writes to current directory; reads anywhere; no network. Exceptions/details:
   delete or rename their files there, `ssh-agent`'s socket included.
 
 - **Reads**: Everything except some well-known private files: `~/.ssh`,
-  `~/.gnupg`, `~/.aws`, `~/.kube`, `~/.docker`, `~/.netrc`, `~/.npmrc`,
+  `~/.gnupg`, `~/.aws`, `~/.kube`, `~/.docker`, `~/.netrc`,
+  `~/.git-credentials`, `~/.npmrc`,
   `~/.config/gh`, `~/.claude` and friends; all of `~/Library`, which holds the
   keychain, your cookies and your mail, with the developer subtrees
   (`Developer`, `Caches`, `Fonts`, `Android`, `Python`, `pnpm`) given back;
