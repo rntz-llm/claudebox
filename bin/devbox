@@ -202,16 +202,20 @@ def read_config(config_file: str) -> list[Directive]:
         die(f"cannot read {config_file}: {e}")
     directives = []
     for n, line in enumerate(lines, 1):
-        line = line.strip()
+        line = line.lstrip()
         if not line or line.startswith("#"):
             continue
         word, _, path = line.partition(" ")
-        path = path.strip()
+        path = path.lstrip()
         if word not in DIRECTIVES:
             die(f"{config_file}:{n}: expected one of "
                 f"{', '.join(DIRECTIVES)}, got ‘{word}’")
         if not path:
             die(f"{config_file}:{n}: {word} needs a path")
+        if path[-1].isspace():
+            die(f"{config_file}:{n}: file path has trailing white space; ambiguous.\n"
+                "If your file path actually ends in white space, sorry, can't handle that yet.\n"
+                "Otherwise, remove trailing spaces.")
         action, _, op = word.partition("-")
         directives.append((action, op, path))
     return directives
