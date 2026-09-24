@@ -75,9 +75,12 @@ Not worth a sandbox that breaks every autumn.
   so a credential in a novel location is readable. Add it to `deny-read`.
 
 - **Starting a process outside the sandbox.** Children inherit the profile, but
-  `open -a`, `launchctl submit` and Apple Events ask a system service to do the
-  work, and what *it* starts is not your child. Closing this needs the
-  mach-service allowlist described above, so it stays open. (The `TIOCSTI`
+  what a system service starts for you is not your child. The usual ways of
+  asking are denied: the `open`, `osascript` and `launchctl` commands (which
+  can't be copied elsewhere either, being unreadable) and Apple Events however
+  they're sent. So browser logins like `gh auth login` fall back to printing the
+  URL. Code that calls LaunchServices or launchd directly still gets through;
+  closing that needs the mach-service allowlist described above. (The `TIOCSTI`
   ioctl, which types commands into your terminal for your shell to run once
   devbox exits, is denied.)
 
@@ -85,7 +88,9 @@ Not worth a sandbox that breaks every autumn.
   The login keychain is reached through `securityd`, preferences through
   `cfprefsd`, file names through Spotlight - none of those are reads by you.
   Try `git credential-osxkeychain get` before assuming your git credentials are
-  out of reach.
+  out of reach. Preference *writes* through `cfprefsd` are denied, since they
+  could set your terminal's startup command; that includes `defaults write` to a
+  plist in the repo, so use `plutil` or `PlistBuddy` there.
 
 - **Secrets that aren't files.** Your environment passes through as-is, so
   whatever your shell exported - `GITHUB_TOKEN`, `ANTHROPIC_API_KEY`,
