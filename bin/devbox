@@ -1,0 +1,496 @@
+#!/usr/bin/python3 -I
+"""Run a command against the current directory under a macOS sandbox, so that
+repo-supplied code -- git hooks, build scripts, dependencies -- can't write
+outside the repo, read your credentials, or talk to the network. See DEVBOX.md.
+
+The shebang is deliberate. `-I` (isolated) ignores PYTHONPATH/PYTHONHOME, drops
+the user site directory, and keeps this script's own directory off sys.path;
+the absolute interpreter path means an activated .venv or a pyenv shim -- both
+of which are chosen by the directory you are standing in, which is the
+directory you have decided not to trust -- cannot supply the interpreter that
+decides what the sandbox means.
+"""
+
+import errno
+import itertools
+import os
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import NoReturn
+
+# A policy directive: action is "allow" or "deny", op is "read" or "write".
+# Order is important: SBPL (SeatBelt Profile Language) is last-match-wins.
+Directive = tuple[str, str, str]  # (action, op, path)
+Rule = tuple[str, str]            # (action, path), within a single op
+
+PROG = os.path.basename(sys.argv[0])
+
+def die(msg) -> NoReturn:
+    print(f"{PROG}: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+SANDBOX_EXEC = "/usr/bin/sandbox-exec"
+LOG = "/usr/bin/log"
+
+USAGE = """\
+usage: {prog} [options] [--] [command [args...]]
+
+Runs command (default: $SHELL) under a sandbox profile that allows writes only
+to the current directory and to temporary directories, denies reads to some
+sensitive directories, and by default denies network access.
+
+options:
+  --network=yes|no     allow IP networking (default: no)
+  --allow-read PATH    permit reads under PATH, overriding a deny
+  --deny-read PATH     deny reads under PATH
+  --allow-write PATH   permit writes under PATH
+  --deny-write PATH    deny writes under PATH, overriding an allow
+  --why                report the sandbox denials the command caused, after it
+                       exits. This is how you find out what to add.
+  --print-profile      print the generated sandbox profile and exit
+  -h, --help           this
+
+The --allow/--deny options are repeatable and apply in the order you give
+them, across reads and writes alike; the last one matching a path wins.
+--allow-write also permits reads, and --deny-read also forbids writes, so a
+path is never writable without being readable.
+
+The same directives can be listed one per line, '#' for a comment, in
+  {config_file}
+
+Precedence, lowest first: the built-in defaults, then that file, then the
+command line.
+
+Option parsing stops at the first non-option argument, so flags meant for the
+command need no --:  {prog} cargo test --release
+"""
+
+
+# -------------------- PATHS --------------------
+@dataclass(frozen=True)
+class Paths:
+    """Where things are on this machine."""
+    cwd: str
+    config_dir: str
+    temp_dir: str  # the per-user one, under /private/var/folders
+    @property
+    def config_file(self) -> str:
+        return os.path.join(self.config_dir, "rules")
+
+_CS_DARWIN_USER_TEMP_DIR = 65537  # From <unistd.h>; CPython doesn't export it.
+
+def find_paths() -> Paths:
+    # Rules say `~`, which expanduser() takes from $HOME. An empty one would
+    # turn ~/.ssh into /.ssh, so it is checked here, before any expansion.
+    home = os.environ.get("HOME")
+    if not home: die("HOME is not set.")
+    # Asked of the OS rather than read from $TMPDIR, which may be unset or
+    # point anywhere.
+    temp_dir = os.confstr(_CS_DARWIN_USER_TEMP_DIR)
+    if not temp_dir: die("cannot find the per-user temp directory.")
+    xdg = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
+    return Paths(cwd=os.getcwd(),
+                 config_dir=os.path.join(xdg, "devbox"),
+                 temp_dir=temp_dir)
+
+def resolve(p: str) -> str:
+    """Absolute physical path, with every symlink resolved, because Seatbelt
+    matches the path an operation resolves to rather than the one it was handed.
+
+    Raises OSError if the path is *broken* -- a symlink loop, a parent we can't
+    traverse. This is fatal: silently dropping rules is a security problem. By
+    contrast, absence is not an error: rules apply even to files that don't
+    exist or don't yet exist.
+    """
+    # realpath() resolves as far as the path exists and re-attaches the rest,
+    # but won't say *why* it couldn't finish, so os.stat() is asked first and
+    # its errno does the classifying.
+    p = os.path.expanduser(p)
+    try:
+        os.stat(p)
+    except OSError as e:
+        if e.errno not in (errno.ENOENT, errno.ENOTDIR):
+            # ELOOP, or a parent we aren't allowed to traverse. Either way the
+            # path is not what it claims to be, and guessing would be worse.
+            raise
+    return os.path.realpath(p)
+
+def vet(path: str) -> str:
+    """Resolve a rule's path and check it can be written into the profile."""
+    try:
+        p = resolve(path)
+    except OSError as e:
+        die(f"{e.filename}: {e.strerror}")
+    # Paths are interpolated into a double-quoted SBPL string, and SBPL cannot
+    # express a literal quote or backslash inside one.
+    if '"' in p or "\\" in p or "\n" in p:
+        die(f"refusing path with a quote, backslash or newline: {p}")
+    # (subpath "/") as an allow would cancel every deny below it, and as a deny
+    # would shut the machine. Neither is ever meant.
+    if p == "/":
+        die("‘/’ is not a usable rule: name a directory under it.")
+    return p
+
+
+# -------------------- ARGUMENTS --------------------
+@dataclass
+class Options:
+    network: bool = False
+    # One ordered list, not one per op, so that every --allow/--deny keeps its
+    # position relative to all the others: `--allow-write X --deny-read X` and
+    # the reverse mean different things.
+    directives: list[Directive] = field(default_factory=list)
+    print_profile: bool = False
+    why: bool = False
+    help: bool = False
+
+DIRECTIVES = ("allow-read", "deny-read", "allow-write", "deny-write")
+VALUE_FLAGS = ("--network",) + tuple("--" + d for d in DIRECTIVES)
+
+def parse_args(argv: list[str]) -> tuple[Options, list[str]]:
+    """Hand-rolled because argparse cannot express “stop at the first non-option
+    argument” -- so we can't write `devbox cargo test --release` with no `--`.
+    REMAINDER misbehaves when the remainder starts with something option-shaped,
+    and parse_known_args scatters the command's own flags into the unrecognised
+    pile.
+    """
+    opts, args = Options(), list(argv)
+    while args and args[0].startswith("-"):
+        arg = args.pop(0)
+        name, eq, value = arg.partition("=")
+        if name in VALUE_FLAGS:
+            # Both `--flag=VALUE` and `--flag VALUE`.
+            if not eq:
+                if not args: die(f"{name} needs an argument.")
+                value = args.pop(0)
+            if not value: die(f"{name}: empty argument.")
+            if name == "--network":
+                if value not in ("yes", "no"):
+                    die(f"--network takes ‘yes’ or ‘no’, not ‘{value}’.")
+                opts.network = value == "yes"
+            else:  # --(allow|deny)-(read|write)
+                action, _, op = name[2:].partition("-")
+                opts.directives.append((action, op, value))
+        elif arg == "--why":
+            opts.why = True
+        elif arg == "--print-profile":
+            opts.print_profile = True
+        elif arg in ("-h", "--help"):
+            opts.help = True
+            return opts, []
+        elif arg == "--":
+            break
+        else:
+            die(f"unknown option ‘{arg}’ (see --help).")
+    return opts, args
+
+def read_config(config_file: str) -> list[Directive]:
+    """`DIRECTIVE PATH` per line, in file order, where DIRECTIVE is one of the
+    four --allow/--deny flag names. Blank lines and lines starting with '#'
+    are ignored; a missing file is not an error.
+
+    Only whole-line comments: a '#' is legal in a path, and silently
+    truncating someone's rule at one would be the wrong kind of surprise."""
+    try:
+        with open(config_file) as f:
+            lines = f.read().splitlines()
+    except FileNotFoundError:
+        return []
+    except OSError as e:
+        die(f"cannot read {config_file}: {e}")
+    directives = []
+    for n, line in enumerate(lines, 1):
+        line = line.lstrip()
+        if not line or line.startswith("#"):
+            continue
+        word, _, path = line.partition(" ")
+        path = path.lstrip()
+        if word not in DIRECTIVES:
+            die(f"{config_file}:{n}: expected one of "
+                f"{', '.join(DIRECTIVES)}, got ‘{word}’")
+        if not path:
+            die(f"{config_file}:{n}: {word} needs a path")
+        if path[-1].isspace():
+            die(f"{config_file}:{n}: file path has trailing white space; ambiguous.\n"
+                "If your file path actually ends in white space, sorry, can't handle that yet.\n"
+                "Otherwise, remove trailing spaces.")
+        action, _, op = word.partition("-")
+        directives.append((action, op, path))
+    return directives
+
+
+# -------------------- POLICY --------------------
+#
+# Reads allowed by default; writes denied by default. "Files my dev environment
+# reads" is long, personal and open-ended, so enumerating it produces a sandbox
+# that breaks constantly and stops being used; "files that are secrets" is short
+# and close to universal. Writes are the opposite: almost nothing legitimately
+# writes outside the repo and its caches, so enumerating those costs little and
+# catches a lot.
+#
+# The downside is that a secret nobody deny-listed stays readable. With the
+# network off by default that is staged rather than immediate exfiltration,
+# which is the trade being made. See DEVBOX.md.
+
+def default_directives(paths: Paths) -> list[Directive]:
+    """The built-in policy, lowest precedence. Last match wins."""
+    return [
+        ("deny",  "read",  "/Users"),  # other homes stay shut
+        ("allow", "read",  "~"),
+        # The working directory goes early so that later rules override it: `cd
+        # ~/.ssh && devbox` leaves ~/.ssh shut rather than quietly reopening it.
+        ("allow", "write", paths.cwd),
+
+        # Scratch space. Not all of /private/var/folders: beside the user temp
+        # dir, C/ holds per-user caches that unsandboxed processes trust.
+        # /tmp and /var/tmp are world-writable already.
+        ("allow", "write", paths.temp_dir),
+        ("allow", "write", "/private/tmp"),
+        ("allow", "write", "/private/var/tmp"),
+
+        # A mounted Time Machine disk is a copy of $HOME.
+        ("deny",  "read",  "/Volumes"),
+        # Local account password hashes.
+        ("deny",  "read",  "/private/var/db/dslocal"),
+
+        # Credentials and keys.
+        ("deny",  "read",  "~/.ssh"),
+        ("deny",  "read",  "~/.gnupg"),
+        ("deny",  "read",  "~/.aws"),
+        ("deny",  "read",  "~/.azure"),
+        ("deny",  "read",  "~/.config/gcloud"),
+        ("deny",  "read",  "~/.kube"),
+        ("deny",  "read",  "~/.docker"),
+        ("deny",  "read",  "~/.netrc"),
+        ("deny",  "read",  "~/.authinfo"),
+        ("deny",  "read",  "~/.authinfo.gpg"),
+        ("deny",  "read",  "~/.password-store"),
+        ("deny",  "read",  "~/.terraform.d"),
+        ("deny",  "read",  "~/.npmrc"),
+        ("deny",  "read",  "~/.pypirc"),
+        ("deny",  "read",  "~/.gem/credentials"),
+        ("deny",  "read",  "~/.cargo/credentials.toml"),
+        ("deny",  "read",  "~/.config/gh"),
+        ("deny",  "read",  "~/.config/glab-cli"),
+        ("deny",  "read",  "~/.config/op"),
+        ("deny",  "read",  "~/.1password"),
+        ("deny",  "read",  "~/.claude"),
+        ("deny",  "read",  "~/.config/anthropic"),
+        ("deny",  "read",  "~/.local/share/keyrings"),
+
+        # ~/Library is denied wholesale: it is the highest secret density on the
+        # machine (Cookies alone are session tokens for everything you are
+        # logged in to) and the least enumerable. The dev-relevant subtrees are
+        # given back -- an allowlist inside a denylist, worth the complication
+        # just this once.
+        ("deny",  "read",  "~/Library"),
+        # Xcode: toolchains, SDKs, DerivedData.
+        ("allow", "read",  "~/Library/Developer"),
+        # Homebrew, pip, go-build, SwiftPM, CocoaPods.
+        ("allow", "read",  "~/Library/Caches"),
+        ("allow", "read",  "~/Library/Fonts"),
+        ("allow", "read",  "~/Library/Android"),
+        ("allow", "read",  "~/Library/Python"),
+        ("allow", "read",  "~/Library/pnpm"),
+        # ...except the parts of Caches that are somebody's browsing history.
+        ("deny",  "read",  "~/Library/Caches/com.apple.Safari"),
+        ("deny",  "read",  "~/Library/Caches/Google"),
+        ("deny",  "read",  "~/Library/Caches/Firefox"),
+        ("deny",  "read",  "~/Library/Caches/BraveSoftware"),
+
+        # Which paths are protected is itself a hint worth not handing over.
+        ("deny",  "read",  paths.config_dir),
+
+        # Repo-supplied code that can edit these gets to run commands later,
+        # outside the sandbox, the next time you touch the repo with git:
+        # core.fsmonitor, core.sshCommand and diff.*.textconv all execute.
+        # Denying the write only: git has to be able to read its own config.
+        ("deny",  "write", f"{paths.cwd}/.git/hooks"),
+        ("deny",  "write", f"{paths.cwd}/.git/config"),
+    ]
+
+def expand(d: Directive) -> list[Directive]:
+    """A directive and whatever it implies, at the same position.
+
+    Writable-but-not-readable is not a state worth being able to express: it
+    breaks every tool that opens O_RDWR, and it doesn't buy secrecy, because `mv
+    ~/.aws/creds ./stolen` needs write on both ends and read on neither. To
+    ensure `writable implies readable` is true, we make allow-write imply
+    allow-read, and deny-read imply deny-write.
+    """
+    action, op, path = d
+    if (action, op) == ("allow", "write"): return [d, ("allow", "read", path)]
+    if (action, op) == ("deny", "read"): return [d, ("deny", "write", path)]
+    return [d]
+
+def rules_for(op: str, directives: list[Directive]) -> list[Rule]:
+    return [(action, path) for action, o, path in directives if o == op]
+
+def refuse_denied_cwd(cwd: str, directives: list[Directive]) -> None:
+    """Check if working directory is deny-read (hence also deny-write) under
+    last-match-wins; this is basically useless, so die with an error message.
+    """
+    denied = None
+    for action, path in rules_for("read", directives):
+        if cwd == path or cwd.startswith(path + "/"):
+            denied = path if action == "deny" else None
+    if denied is not None:
+        die(f"refusing to run in ‘{cwd}’: it is inside ‘{denied}’, which "
+            "is denied reads, so nothing there would be readable. To run "
+            "there anyway, add --allow-read . or --allow-write .")
+
+def resolved(ds: list[Directive]) -> list[Directive]:
+    """Vet each path, then expand. Every rule either renders or is fatal."""
+    return [e for action, op, p in ds for e in expand((action, op, vet(p)))]
+
+def ruleset(paths: Paths, opts: Options) -> list[Directive]:
+    """The whole policy as one ordered list: defaults, then your config file,
+    then your command line, each able to override what came before."""
+    directives = resolved(default_directives(paths)
+                          + read_config(paths.config_file) + opts.directives)
+    refuse_denied_cwd(paths.cwd, directives)
+    return directives
+
+def stanzas(rules: list[Rule], op: str) -> str:
+    """Render rules as SBPL, one stanza per run of like actions. The order is
+    the meaning: SBPL is last-match-wins, so a later rule overrides an earlier
+    one and reordering these changes the policy."""
+    out = []
+    for action, group in itertools.groupby(rules, key=lambda r: r[0]):
+        body = "\n".join(f'       (subpath "{p}")' for _, p in group)
+        out.append(f"({action} {op}\n{body})")
+    return "\n".join(out)
+
+PROFILE = '''(version 1)
+(allow default)
+
+;; ---- writes: the working directory and scratch space, nothing else ----
+(deny file-write*)
+;; The character devices everything expects to be able to write to. Not
+;; subpaths, so a fixed stanza rather than rules. First, so that a later rule
+;; of yours could take one away; nothing in the defaults matches /dev, so
+;; nothing does.
+(allow file-write*
+       (literal "/dev/null")
+       (literal "/dev/zero")
+       (literal "/dev/random")
+       (literal "/dev/urandom")
+       (literal "/dev/dtracehelper")
+       (literal "/dev/tty")
+       (literal "/dev/ptmx")
+       (subpath "/dev/fd")
+       (regex #"^/dev/ttys[0-9]+$"))
+{write_rules}
+
+;; ---- reads: everything, minus what is worth stealing ----
+{read_rules}
+;; Metadata everywhere regardless, so that stat() and path-walking work.
+(allow file-read-metadata)'''
+
+NO_NETWORK = '''
+
+;; ---- network: no IP ----
+(deny network*)'''
+
+# After NO_NETWORK, if present, and emitted whatever --network says.
+UNIX_SOCKETS = '''
+
+;; ---- unix sockets: none but syslog, and DNS with the network on ----
+;; Sockets in shared directories reach programs outside the sandbox that run
+;; commands for whoever connects: tmux, the Emacs server, VS Code, Postgres.
+;; Path filters match only unix sockets, so this leaves IP alone.
+(deny network* (subpath "/"))
+(allow network-outbound (literal "/private/var/run/syslog"))'''
+
+# Only with the network on: with it off, a lookup is itself a leak.
+RESOLVER = '''
+(allow network-outbound (literal "/private/var/run/mDNSResponder"))'''
+
+def build_profile(paths: Paths, opts: Options) -> str:
+    directives  = ruleset(paths, opts)
+    read_rules  = stanzas(rules_for("read", directives), "file-read*")
+    write_rules = stanzas(rules_for("write", directives), "file-write*")
+    profile = PROFILE.format(write_rules=write_rules, read_rules=read_rules)
+    if opts.network:
+        return profile + UNIX_SOCKETS + RESOLVER
+    return profile + NO_NETWORK + UNIX_SOCKETS
+
+
+# -------------------- RUNNING --------------------
+def run_with_why(profile: str, cmd: list[str]) -> int:
+    """--why: run rather than exec, so that the denials can be collected
+    afterwards. `log show` after the fact rather than `log stream` alongside,
+    because stream takes a moment to attach and would miss the denials at
+    startup, which are the ones you most want to see."""
+    started = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    status = subprocess.call([SANDBOX_EXEC, "-p", profile] + cmd)
+    print(f"{PROG}: sandbox denials since {started}:", file=sys.stderr)
+    # A denial is logged as e.g.
+    #   Sandbox: bash(123) deny(1) file-read-data /Users/me/.ssh/id_ed25519
+    # The predicate is the part most likely to need adjusting across macOS
+    # releases; `log show --last 2m --predicate 'eventMessage CONTAINS "deny("'`
+    # by hand is the fallback.
+    out = subprocess.run(
+        [LOG, "show", "--style", "compact", "--start", started,
+         "--predicate", 'eventMessage CONTAINS "deny("'],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+    ).stdout
+    denials = [line for line in out.splitlines()
+               if not line.startswith("Timestamp")]
+    print("\n".join(denials) if denials else f"{PROG}: none logged.",
+          file=sys.stderr)
+    return status
+
+def check_reasonable(paths: Paths, opts: Options):
+    """Die if the user has requested something unreasonable."""
+    # Check --allow/deny flags for nonexistent paths. These are likely typos,
+    # possibly dangerous. This is stricter than the config files, which may name
+    # tools you haven't installed: a path you just typed should exist.
+    for action, op, p in opts.directives:
+        flag = f"--{action}-{op}"
+        try: os.stat(os.path.expanduser(p))
+        except OSError as e: die(f"{flag}: {e.filename}: {e.strerror}")
+        # Laxer: require only the parent, allowing rules on paths not created
+        # yet (e.g. --deny-write ./.envrc). Swap for the check above.
+        # head = os.path.dirname(os.path.expanduser(p).rstrip("/")) or "."
+        # if not os.path.isdir(head):
+        #     die(f"{flag}: no such directory: {head}")
+
+    # Refuse to run in a home/root dir. The whole point is that only one
+    # directory is writable, so a home/rootdir is not a useful choice.
+    cwd = paths.cwd
+    if cwd in ("/", "/Users") or os.path.dirname(cwd) == "/Users":
+        die(f"refusing to run with ‘{cwd}’ writable: cd to a project "
+            "directory, not a home directory or the root of the filesystem.")
+
+def main() -> int:
+    if os.uname().sysname != "Darwin":
+        die(f"macOS only -- sandbox-exec doesn't exist on {os.uname().sysname}.")
+    if not os.access(SANDBOX_EXEC, os.X_OK):
+        die(f"{SANDBOX_EXEC} is missing; nothing to sandbox with.")
+
+    opts, rest = parse_args(sys.argv[1:])
+    paths = find_paths()
+    if opts.help:
+        sys.stdout.write(USAGE.format(prog=PROG, config_file=paths.config_file))
+        return 0
+    cmd = rest or [os.environ.get("SHELL") or "/bin/bash"]
+
+    check_reasonable(paths, opts)
+    profile = build_profile(paths, opts)
+    if opts.print_profile:
+        print(profile)
+        return 0
+
+    # Marks the shell as sandboxed for anyone who wants to say so in a prompt.
+    os.environ["DEVBOX"] = "1"
+
+    if not opts.why:
+        os.execv(SANDBOX_EXEC, [SANDBOX_EXEC, "-p", profile] + cmd)
+    else:
+        return run_with_why(profile, cmd)
+
+if __name__ == "__main__":
+    sys.exit(main())

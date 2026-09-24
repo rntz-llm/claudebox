@@ -1,13 +1,18 @@
-Use Apple containers to sandbox Claude in a lightweight VM with network access and `sudo`
-to install tools. Made for my own use; may or may not work for you.
+Lightweight sandboxing tools for macOS. Made for my own use; may or may not work for you.
+Put `bin/` on `PATH` to use.
 
-Put `bin/` on your `PATH`. Then `claudebox` runs a Debian container with the current
-directory ("project") mounted as `/workspace`. Each project's Claude state (memories,
-transcripts, login) persists in `~/.local/state/claudebox/projects/`, keyed by the project
-path. `claudebox-gc` lists projects and cleans up after ones you've deleted or moved.
+`claudebox` uses Apple containers to sandbox Claude in a Debian VM with network access and
+`sudo` to install tools. The current directory ("project") is mounted as `/workspace`.
+Each project's Claude state (memories, transcripts, login) persists in
+`~/.local/state/claudebox/projects/`, keyed by the project path. `claudebox-gc` lists
+projects and cleans up after ones you've deleted or moved. The first `claudebox` run
+builds the container image; see `Dockerfile`. Use `buildbox` to (re)build the image
+explicitly.
 
-The first `claudebox` run builds the container image; see `Dockerfile`. Use `buildbox` to
-(re)build the image explicitly.
+`bin/devbox` is the lighter-weight sibling, meant to contain accidents more than to resist
+attack: instead of a VM, it runs a command under a `sandbox-exec` profile that permits
+writes only inside the current directory and temporary directories, denies reads of some
+sensitive locations, and denies the network unless you ask for it. See DEVBOX.md.
 
 **Things you might use instead:**
 

@@ -43,46 +43,6 @@ given a github url, clone the git repo. where, though?
 - make a directory specifically for git clones?
 - have a config file for this script that specifies?
 
-** build a convenient sandbox-exec command-line wrapper
-
-PR #6 open: bin/devbox + DEVBOX.md, written but never run on macOS.
-
-name (maybe): devbox?
-purpose: allow me to interact with a repo on macOS with less trust.
-
-example threats I'd like to defend against, at least a little:
-- malicious git hooks etc authored by prompt-injected LLM
-- malicious dependency/supply chain attack
-- honest mistakes in LLM- or human-written code
-
-defaults:
-
-- read/write access to cwd.
-
-- no network access. want a flag (--network=yes, --network=no) to control this.
-
-- read access to some reasonable selection of system dirs so I can run commands.
-
-- read access to some reasonable subset of my homedir so eg `git` still works; my current
-  ~/.claude/settings.json sandbox block might be helpful as a starting point:
-
-    "filesystem": {
-      "denyRead": [
-        "~/",
-        "/Users/"
-      ],
-      "allowRead": [
-        "~/.gitconfig",
-        "~/.gitexclude",
-        "~/.rustup/",
-        "~/.cargo/"
-      ]
-
-problem:
-- what about git push/pull? needs network. if I give it network, how do I defend against
-  exfiltration of eg github credentials? seems hard. solve this later; any sandbox is an
-  improvement over no sandbox.
-
 * things necessary to make this usable by other people than me
 
 ** put less into the image and make it configurable at container start time
