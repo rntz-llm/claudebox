@@ -63,7 +63,7 @@ The same directives can be listed one per line, '#' for a comment, in
   {config_file}
 
 Precedence, lowest first: the built-in defaults, then that file, then the
-command line, then a few pinned denies (this config, .git/config, .git/hooks).
+command line, then a few pinned denies (this config, parts of .git).
 
 Option parsing stops at the first non-option argument, so flags meant for the
 command need no --:  {prog} cargo test --release
@@ -348,6 +348,8 @@ def pinned_directives(paths: Paths) -> list[Directive]:
         # Denying the write only: git has to be able to read its own config.
         ("deny",  "write", f"{paths.cwd}/.git/hooks"),
         ("deny",  "write", f"{paths.cwd}/.git/config"),
+        # Submodules' hooks and config.
+        ("deny",  "write", f"{paths.cwd}/.git/modules"),
     ]
 
 def expand(d: Directive) -> list[Directive]:
@@ -443,6 +445,9 @@ PROFILE = '''(version 1)
        (subpath "/dev/fd")
        (regex #"^/dev/ttys[0-9]+$"))
 {write_rules}
+;; .git itself, so that it can't be swapped for one with another config, and a
+;; worktree's .git file can't be repointed. A literal: git writes inside it.
+(deny file-write* (literal "{cwd}/.git"))
 
 ;; ---- reads: everything, minus what is worth stealing ----
 {read_rules}
@@ -491,7 +496,8 @@ def build_profile(paths: Paths, opts: Options) -> str:
     directives  = ruleset(paths, opts)
     read_rules  = stanzas(rules_for("read", directives), "file-read*")
     write_rules = stanzas(rules_for("write", directives), "file-write*")
-    profile = PROFILE.format(write_rules=write_rules, read_rules=read_rules)
+    profile = PROFILE.format(write_rules=write_rules, read_rules=read_rules,
+                             cwd=paths.cwd)
     if opts.network:
         return profile + UNIX_SOCKETS + RESOLVER
     return profile + NO_NETWORK + UNIX_SOCKETS
