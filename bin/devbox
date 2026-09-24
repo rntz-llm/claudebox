@@ -20,7 +20,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import NoReturn
+from typing import NoReturn, Optional
 
 # A policy directive: action is "allow" or "deny", op is "read" or "write".
 # Order is important: SBPL (SeatBelt Profile Language) is last-match-wins.
@@ -63,7 +63,7 @@ The same directives can be listed one per line, '#' for a comment, in
   {config_file}
 
 Precedence, lowest first: the built-in defaults, then that file, then the
-command line.
+command line, then a few pinned denies (this config, .git/config, .git/hooks).
 
 Option parsing stops at the first non-option argument, so flags meant for the
 command need no --:  {prog} cargo test --release
@@ -333,8 +333,13 @@ def default_directives(paths: Paths) -> list[Directive]:
         ("deny",  "read",  "~/Library/Caches/Vivaldi"),
         ("deny",  "read",  "~/Library/Caches/com.tinyspeck.slackmacgap"),
         ("deny",  "read",  "~/Library/Caches/BraveSoftware"),
+    ]
 
-        # Which paths are protected is itself a hint worth not handing over.
+def pinned_directives(paths: Paths) -> list[Directive]:
+    """After your rules, so that no --allow can reopen them."""
+    return [
+        # Which paths are protected is itself a hint worth not handing over,
+        # and a writable policy is no policy.
         ("deny",  "read",  paths.config_dir),
 
         # Repo-supplied code that can edit these gets to run commands later,
@@ -362,18 +367,35 @@ def expand(d: Directive) -> list[Directive]:
 def rules_for(op: str, directives: list[Directive]) -> list[Rule]:
     return [(action, path) for action, o, path in directives if o == op]
 
+def last_match(path: str, rules: list[Rule]) -> Optional[Rule]:
+    """The rule that decides `path`: the last one whose subpath covers it."""
+    match = None
+    for action, p in rules:
+        if path == p or path.startswith(p + "/"):
+            match = (action, p)
+    return match
+
 def refuse_denied_cwd(cwd: str, directives: list[Directive]) -> None:
     """Check if working directory is deny-read (hence also deny-write) under
     last-match-wins; this is basically useless, so die with an error message.
     """
-    denied = None
-    for action, path in rules_for("read", directives):
-        if cwd == path or cwd.startswith(path + "/"):
-            denied = path if action == "deny" else None
-    if denied is not None:
-        die(f"refusing to run in ‘{cwd}’: it is inside ‘{denied}’, which "
+    match = last_match(cwd, rules_for("read", directives))
+    if match and match[0] == "deny":
+        die(f"refusing to run in ‘{cwd}’: it is inside ‘{match[1]}’, which "
             "is denied reads, so nothing there would be readable. To run "
             "there anyway, add --allow-read . or --allow-write .")
+
+def warn_reopened(defaults: list[Directive], directives: list[Directive]):
+    """Warn about built-in read denies that a broader rule of yours reopens,
+    e.g. --allow-write ~/.config reopening ~/.config/gh. Reopening one by its
+    own path is taken as meant."""
+    reads = rules_for("read", directives)
+    for action, denied in rules_for("read", defaults):
+        match = last_match(denied, reads)
+        if action == "deny" and match and match[0] == "allow" \
+                and match[1] != denied:
+            print(f"{PROG}: warning: ‘{match[1]}’ reopens ‘{denied}’, which "
+                  "is denied by default.", file=sys.stderr)
 
 def resolved(ds: list[Directive]) -> list[Directive]:
     """Vet each path, then expand. Every rule either renders or is fatal."""
@@ -381,9 +403,13 @@ def resolved(ds: list[Directive]) -> list[Directive]:
 
 def ruleset(paths: Paths, opts: Options) -> list[Directive]:
     """The whole policy as one ordered list: defaults, then your config file,
-    then your command line, each able to override what came before."""
-    directives = resolved(default_directives(paths)
-                          + read_config(paths.config_file) + opts.directives)
+    then your command line, each able to override what came before; then the
+    pinned rules, which nothing overrides."""
+    defaults = resolved(default_directives(paths))
+    directives = defaults + resolved(read_config(paths.config_file)
+                                     + opts.directives
+                                     + pinned_directives(paths))
+    warn_reopened(defaults, directives)
     refuse_denied_cwd(paths.cwd, directives)
     return directives
 

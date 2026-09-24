@@ -145,7 +145,8 @@ The four directives are the four flags: `--allow-read`, `--deny-read`,
 path wins, across reads and writes alike, exactly as SBPL resolves them.
 `--deny-read ~/x --allow-read ~/x/pub` means what it looks like; so does the
 reverse. Precedence runs lowest to highest: the built-in defaults, then the
-config file, then the command line.
+config file, then the command line, then a few pinned denies nothing overrides:
+the devbox config directory, and `.git/config` and `.git/hooks`.
 
 **Two directives imply a second.** `allow-write` also permits reads, and
 `deny-read` also forbids writes, at the same position in the sequence:
@@ -168,10 +169,9 @@ what lets `.git/config` stay readable while being unwritable, and `allow-read`
 grants no writes, which is what keeps `~/Library/Caches` readable but not
 writable until you ask.
 
-**Your rules silently override the built-in ones**, and a broad
-`--allow-write` is also a broad `--allow-read`. `--allow-write ~` reopens every
-credential deny; `--allow-write .` reopens `.git/config` and `.git/hooks`;
-`--allow-write ~/.config` lets sandboxed code rewrite your devbox rules.
+**Your rules override the built-in ones**, and a broad `--allow-write` is also
+a broad `--allow-read`: `--allow-write ~` reopens every credential deny. devbox
+warns when a rule reopens a built-in deny other than by naming it exactly.
 
 The working directory is allowed early, ahead of the credential denies, so
 `cd ~/.ssh && devbox` leaves `~/.ssh` shut rather than quietly reopening it —
