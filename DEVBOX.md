@@ -29,7 +29,7 @@ Writes to current directory; reads anywhere; no network. Exceptions/details:
   `.git/hooks` either, nor `.git` itself or `.git/modules`, even though they
   are inside the writable directory - see below. `/tmp` is shared with your
   unsandboxed programs, so sandboxed code can delete or rename their files
-  there, `ssh-agent`'s socket included.
+  there, bar launchd's socket directories (`ssh-agent`'s).
 
 - **Reads**: Everything except some well-known private files: `~/.ssh`,
   `~/.gnupg`, `~/.aws`, `~/.kube`, `~/.docker`, `~/.netrc`,

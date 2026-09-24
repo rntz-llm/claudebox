@@ -250,7 +250,8 @@ def default_directives(paths: Paths) -> list[Directive]:
 
         # Scratch space. Not all of /private/var/folders: beside the user temp
         # dir, C/ holds per-user caches that unsandboxed processes trust.
-        # /tmp and /var/tmp are world-writable already.
+        # /tmp and /var/tmp because too much hardcodes them, though that lets
+        # sandboxed code tamper with your other programs' files there.
         ("allow", "write", paths.temp_dir),
         ("allow", "write", "/private/tmp"),
         ("allow", "write", "/private/var/tmp"),
@@ -448,6 +449,8 @@ PROFILE = '''(version 1)
 ;; .git itself, so that it can't be swapped for one with another config, and a
 ;; worktree's .git file can't be repointed. A literal: git writes inside it.
 (deny file-write* (literal "{cwd}/.git"))
+;; launchd's per-user socket directories in /tmp: ssh-agent's, among others.
+(deny file-write* (regex #"^/private/tmp/com\\.apple\\.launchd\\."))
 
 ;; ---- reads: everything, minus what is worth stealing ----
 {read_rules}
