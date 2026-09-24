@@ -127,8 +127,8 @@ class Options:
     print_profile: bool = False
     why: bool = False
 
-DIRECTIVE_FLAGS = ("--allow-read", "--deny-read", "--allow-write", "--deny-write")
-VALUE_FLAGS = ("--network",) + DIRECTIVE_FLAGS
+DIRECTIVES = ("allow-read", "deny-read", "allow-write", "deny-write")
+VALUE_FLAGS = ("--network",) + tuple("--" + d for d in DIRECTIVES)
 
 def parse_args(argv: list[str]) -> tuple[Options, list[str]]:
     """Hand-rolled because argparse cannot express “stop at the first non-option
@@ -145,19 +145,16 @@ def parse_args(argv: list[str]) -> tuple[Options, list[str]]:
         if name in VALUE_FLAGS:
             # Both `--flag=VALUE` and `--flag VALUE`.
             if eq: value = inline
-            elif i + 1 < len(argv): value = argv[i + 1]
-            else:
-                die(f"{name}: no argument supplied.")
+            elif i + 1 < len(argv): value, step = argv[i + 1], 2
+            else: die(f"{name} needs an argument.")
+            if not value: die(f"{name}: empty argument.")
             if name == "--network":
                 if value not in ("yes", "no"):
                     die(f"--network takes ‘yes’ or ‘no’, not ‘{value}’.")
                 opts.network = value == "yes"
-            elif name in DIRECTIVE_FLAGS: # --(allow|deny)-(read|write)
+            else:  # --(allow|deny)-(read|write)
                 action, _, op = name[2:].partition("-")
-                assert action in ("allow", "deny") and op in ("read", "write")
                 opts.directives.append((action, op, value))
-            else:
-                assert False, f"Unimplemented flag: {name}"
         elif arg == "--why":
             opts.why = True
         elif arg == "--print-profile":
@@ -182,8 +179,6 @@ def check_flag_rules(directives: list[Directive]) -> None:
     you just typed should exist, or at least its parent should."""
     for action, op, p in directives:
         flag = f"--{action}-{op}"
-        if not p:
-            die(f"{flag} needs a path.")
         try:
             resolve(p)
         except OSError as e:
@@ -195,8 +190,6 @@ def check_flag_rules(directives: list[Directive]) -> None:
         head = os.path.dirname(os.path.expanduser(p).rstrip("/")) or "."
         if not os.path.isdir(head):
             die(f"no such directory: {head} (from {flag})")
-
-DIRECTIVES = ("allow-read", "deny-read", "allow-write", "deny-write")
 
 def read_config() -> list[Directive]:
     """`DIRECTIVE PATH` per line, in file order, where DIRECTIVE is one of the
@@ -426,13 +419,6 @@ def build_profile(cwd: str, opts: Options) -> str:
     directives  = ruleset(cwd, opts)
     read_rules  = stanzas(rules_for("read", directives), "file-read*")
     write_rules = stanzas(rules_for("write", directives), "file-write*")
-    # A bare `(allow file-write*)` -- what an empty stanza renders as -- would
-    # cancel the deny above it and make the whole filesystem writable.
-    #
-    # FIXME: this seems like the wrong place to catch this. should stanzas() do
-    # it?
-    if "(allow file-write*\n" not in write_rules:
-        die("internal error: no writable path; the profile would be unsafe.")
     profile = PROFILE.format(write_rules=write_rules,
                              read_rules=read_rules,
                              device_writes=DEVICE_WRITES)
@@ -440,7 +426,6 @@ def build_profile(cwd: str, opts: Options) -> str:
 
 
 # -------------------- RUNNING --------------------
-
 def run_with_why(profile: str, cmd: list[str]) -> int:
     """--why: run rather than exec, so that the denials can be collected
     afterwards. `log show` after the fact rather than `log stream` alongside,
