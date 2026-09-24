@@ -234,41 +234,6 @@ def read_config() -> list[Directive]:
 # readable. With the network off by default that is staged exfiltration rather
 # than exfiltration, which is the trade being made. See DEVBOX.md.
 
-# Credentials and keys, relative to $HOME.
-DENY_READ_HOME = [
-    ".ssh", ".gnupg", ".aws", ".azure", ".config/gcloud", ".kube", ".docker",
-    ".netrc", ".authinfo", ".authinfo.gpg", ".password-store", ".terraform.d",
-    ".npmrc", ".pypirc", ".gem/credentials", ".cargo/credentials.toml",
-    ".config/gh", ".config/glab-cli", ".config/op", ".1password",
-    ".claude", ".config/anthropic", ".local/share/keyrings",
-]
-
-# ~/Library is denied wholesale: it is the highest secret density on the
-# machine (Cookies alone are session tokens for everything you are logged in
-# to) and the least enumerable. The dev-relevant subtrees are given back here
-# -- an allowlist inside a denylist, worth the complication just this once.
-LIBRARY_ALLOW = [
-    "Library/Developer",   # Xcode: toolchains, SDKs, DerivedData
-    "Library/Caches",      # Homebrew, pip, go-build, SwiftPM, CocoaPods
-    "Library/Fonts",
-    "Library/Android",
-    "Library/Python",
-    "Library/pnpm",
-]
-
-# ...except the parts of Caches that are somebody's browsing history.
-LIBRARY_REDENY = [
-    "Library/Caches/com.apple.Safari",
-    "Library/Caches/Google",
-    "Library/Caches/Firefox",
-    "Library/Caches/BraveSoftware",
-]
-
-DENY_READ_ABS = [
-    "/Volumes",                 # a mounted Time Machine disk is a copy of $HOME
-    "/private/var/db/dslocal",  # local account password hashes
-]
-
 # The character devices everything expects to be able to write to. Not
 # subpaths, so this is a fixed stanza rather than a rule.
 DEVICE_WRITES = '''(allow file-write*
@@ -285,14 +250,12 @@ DEVICE_WRITES = '''(allow file-write*
 # From <unistd.h>; CPython doesn't export it.
 _CS_DARWIN_USER_TEMP_DIR = 65537
 
-def scratch_dirs() -> list[str]:
+def user_temp_dir() -> str:
     """The per-user temp directory under /private/var/folders, asked of the OS
-    rather than read from $TMPDIR, which may be unset or point anywhere. Not
-    the tree as a whole: the sibling C/ holds per-user caches that unsandboxed
-    processes trust. /tmp and /var/tmp are world-writable already."""
-    tmpdir = os.confstr(_CS_DARWIN_USER_TEMP_DIR)
-    if not tmpdir: die("cannot find the per-user temp directory.")
-    return [tmpdir, "/private/tmp", "/private/var/tmp"]
+    rather than read from $TMPDIR, which may be unset or point anywhere."""
+    d = os.confstr(_CS_DARWIN_USER_TEMP_DIR)
+    if not d: die("cannot find the per-user temp directory.")
+    return d
 
 def expand(d: Directive) -> list[Directive]:
     """A directive and whatever it implies, at the same position.
@@ -312,30 +275,83 @@ def expand(d: Directive) -> list[Directive]:
     return [d]
 
 def default_directives(cwd: str) -> list[Directive]:
-    """The built-in policy, lowest precedence.
+    """The built-in policy, lowest precedence. Last match wins.
 
     The working directory is allowed early, ahead of the credential denies,
     so that those override it: `cd ~/.ssh && devbox` leaves ~/.ssh shut
     rather than quietly reopening it."""
-    h = home()
-    ds: list[Directive] = [("deny", "read", "/Users"),   # other homes stay shut
-                           ("allow", "read", h),
-                           ("allow", "write", cwd)]
-    ds += [("allow", "write", p) for p in scratch_dirs()]
-    ds += [("deny", "read", p) for p in DENY_READ_ABS]
-    ds += [("deny", "read", os.path.join(h, p)) for p in DENY_READ_HOME]
-    ds += [("deny", "read", os.path.join(h, "Library"))]
-    ds += [("allow", "read", os.path.join(h, p)) for p in LIBRARY_ALLOW]
-    ds += [("deny", "read", os.path.join(h, p)) for p in LIBRARY_REDENY]
-    # Which paths are protected is itself a hint worth not handing over.
-    ds += [("deny", "read", CONFIG_DIR)]
-    # Repo-supplied code that can edit these gets to run commands later,
-    # outside the sandbox, the next time you touch the repo with git:
-    # core.fsmonitor, core.sshCommand and diff.*.textconv all execute. Denying
-    # the write only: git has to be able to read its own config.
-    ds += [("deny", "write", os.path.join(cwd, ".git/hooks")),
-           ("deny", "write", os.path.join(cwd, ".git/config"))]
-    return ds
+    return [
+        ("deny",  "read",  "/Users"),  # other homes stay shut
+        ("allow", "read",  "~"),
+        ("allow", "write", cwd),
+
+        # Scratch space. Not all of /private/var/folders: beside the user temp
+        # dir, C/ holds per-user caches that unsandboxed processes trust.
+        # /tmp and /var/tmp are world-writable already.
+        ("allow", "write", user_temp_dir()),
+        ("allow", "write", "/private/tmp"),
+        ("allow", "write", "/private/var/tmp"),
+
+        # A mounted Time Machine disk is a copy of $HOME.
+        ("deny",  "read",  "/Volumes"),
+        # Local account password hashes.
+        ("deny",  "read",  "/private/var/db/dslocal"),
+
+        # Credentials and keys.
+        ("deny",  "read",  "~/.ssh"),
+        ("deny",  "read",  "~/.gnupg"),
+        ("deny",  "read",  "~/.aws"),
+        ("deny",  "read",  "~/.azure"),
+        ("deny",  "read",  "~/.config/gcloud"),
+        ("deny",  "read",  "~/.kube"),
+        ("deny",  "read",  "~/.docker"),
+        ("deny",  "read",  "~/.netrc"),
+        ("deny",  "read",  "~/.authinfo"),
+        ("deny",  "read",  "~/.authinfo.gpg"),
+        ("deny",  "read",  "~/.password-store"),
+        ("deny",  "read",  "~/.terraform.d"),
+        ("deny",  "read",  "~/.npmrc"),
+        ("deny",  "read",  "~/.pypirc"),
+        ("deny",  "read",  "~/.gem/credentials"),
+        ("deny",  "read",  "~/.cargo/credentials.toml"),
+        ("deny",  "read",  "~/.config/gh"),
+        ("deny",  "read",  "~/.config/glab-cli"),
+        ("deny",  "read",  "~/.config/op"),
+        ("deny",  "read",  "~/.1password"),
+        ("deny",  "read",  "~/.claude"),
+        ("deny",  "read",  "~/.config/anthropic"),
+        ("deny",  "read",  "~/.local/share/keyrings"),
+
+        # ~/Library is denied wholesale: it is the highest secret density on
+        # the machine (Cookies alone are session tokens for everything you are
+        # logged in to) and the least enumerable. The dev-relevant subtrees are
+        # given back -- an allowlist inside a denylist, worth the complication
+        # just this once.
+        ("deny",  "read",  "~/Library"),
+        # Xcode: toolchains, SDKs, DerivedData.
+        ("allow", "read",  "~/Library/Developer"),
+        # Homebrew, pip, go-build, SwiftPM, CocoaPods.
+        ("allow", "read",  "~/Library/Caches"),
+        ("allow", "read",  "~/Library/Fonts"),
+        ("allow", "read",  "~/Library/Android"),
+        ("allow", "read",  "~/Library/Python"),
+        ("allow", "read",  "~/Library/pnpm"),
+        # ...except the parts of Caches that are somebody's browsing history.
+        ("deny",  "read",  "~/Library/Caches/com.apple.Safari"),
+        ("deny",  "read",  "~/Library/Caches/Google"),
+        ("deny",  "read",  "~/Library/Caches/Firefox"),
+        ("deny",  "read",  "~/Library/Caches/BraveSoftware"),
+
+        # Which paths are protected is itself a hint worth not handing over.
+        ("deny",  "read",  CONFIG_DIR),
+
+        # Repo-supplied code that can edit these gets to run commands later,
+        # outside the sandbox, the next time you touch the repo with git:
+        # core.fsmonitor, core.sshCommand and diff.*.textconv all execute.
+        # Denying the write only: git has to be able to read its own config.
+        ("deny",  "write", f"{cwd}/.git/hooks"),
+        ("deny",  "write", f"{cwd}/.git/config"),
+    ]
 
 def ruleset(cwd: str, opts: Options) -> list[Directive]:
     """The whole policy as one ordered stream: defaults, then your config
