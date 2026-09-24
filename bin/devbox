@@ -188,26 +188,6 @@ def parse_args(argv: list[str]) -> tuple[Options, list[str]]:
         i += step
     return opts, argv[i:]
 
-def check_flag_rules(directives: list[Directive]) -> None:
-    """Vet the paths you asked for up front. An unresolvable one would otherwise
-    be dropped and reappear later as a mysterious denial. Stricter than the
-    config files, which may name tools you haven't installed: a path you just
-    typed should exist, or at least its parent should.
-    """
-    for action, op, p in directives:
-        flag = f"--{action}-{op}"
-        try:
-            resolve(p)
-        except OSError as e:
-            die(f"{e.filename}: {e.strerror} (from {flag})")
-        # A path you just typed should at least have a parent that exists. The
-        # defaults and the config files are exempt -- they may name tools you
-        # don't have -- but here a typo would allow or deny the wrong thing,
-        # silently, and one stat catches it.
-        head = os.path.dirname(os.path.expanduser(p).rstrip("/")) or "."
-        if not os.path.isdir(head):
-            die(f"no such directory: {head} (from {flag})")
-
 def read_config(config_file: str) -> list[Directive]:
     """`DIRECTIVE PATH` per line, in file order, where DIRECTIVE is one of the
     four --allow/--deny flag names. Blank lines and lines starting with '#'
@@ -503,8 +483,26 @@ def main() -> int:
     if opts.help:
         sys.stdout.write(USAGE.format(prog=PROG, config_file=paths.config_file))
         return 0
-    # Check for --allow/deny flags on nonexistent paths (likely typos).
-    check_flag_rules(opts.directives)
+
+    # Check --allow/deny flags for nonexistent paths. These are likely typos,
+    # possibly dangerous. This is stricter than the config files, which may name
+    # tools you haven't installed: a path you just typed should exist, or at
+    # least its parent should.
+    for action, op, p in opts.directives:
+        flag = f"--{action}-{op}"
+        try: resolve(p)
+        except OSError as e:
+            die(f"{flag}: {e.filename}: {e.strerror}")
+        # TODO FIXME: should we really accept things whose parent exist but
+        # don't exist themselves?
+        #
+        # A path you just typed should at least have a parent that exists. The
+        # defaults and the config files are exempt -- they may name tools you
+        # don't have -- but here a typo would allow or deny the wrong thing,
+        # silently, and one stat catches it.
+        head = os.path.dirname(os.path.expanduser(p).rstrip("/")) or "."
+        if not os.path.isdir(head):
+            die(f"{flag}: no such directory: {head}")
 
     # Refuse to run in a homedir or root dir; a dangerous mistake.
     refuse_unreasonable_cwd(paths.cwd)
