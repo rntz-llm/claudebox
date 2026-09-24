@@ -114,8 +114,6 @@ anyway. Not worth a sandbox that breaks every autumn.
   Documents). Governed by your *terminal's* grants, not by this profile. If
   you've given your terminal Full Disk Access, that is inherited.
 
-- **Kernel or sandbox escapes.** See Caveats.
-
 ## Configuring it
 
 One file, one directive per line, `#` for a comment:
