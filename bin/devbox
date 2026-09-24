@@ -282,12 +282,16 @@ DEVICE_WRITES = '''(allow file-write*
        (subpath "/dev/fd")
        (regex #"^/dev/ttys[0-9]+$"))'''
 
+# From <unistd.h>; CPython doesn't export it.
+_CS_DARWIN_USER_TEMP_DIR = 65537
+
 def scratch_dirs() -> list[str]:
-    """$TMPDIR is the per-user directory under /private/var/folders; the
-    sibling C/ holds per-user caches that unsandboxed processes trust, so the
-    tree as a whole is not included. /tmp and /var/tmp are world-writable
-    already."""
-    tmpdir = os.environ.get("TMPDIR") or "/private/var/folders"
+    """The per-user temp directory under /private/var/folders, asked of the OS
+    rather than read from $TMPDIR, which may be unset or point anywhere. Not
+    the tree as a whole: the sibling C/ holds per-user caches that unsandboxed
+    processes trust. /tmp and /var/tmp are world-writable already."""
+    tmpdir = os.confstr(_CS_DARWIN_USER_TEMP_DIR)
+    if not tmpdir: die("cannot find the per-user temp directory.")
     return [tmpdir, "/private/tmp", "/private/var/tmp"]
 
 def expand(d: Directive) -> list[Directive]:
@@ -404,15 +408,22 @@ PROFILE = '''(version 1)
 
 NO_NETWORK = '''
 
-;; ---- network: no IP, unix sockets kept ----
-;; Unix-domain sockets are matched by path rather than by address, so allowing
-;; the directories they live in keeps local services (syslog, the DNS resolver,
-;; pasteboard helpers) working while every IP address stays unreachable.
-(deny network*)
-(allow network*
-       (subpath "/private/var/run")
-       (subpath "/private/tmp")
-       (subpath "/private/var/folders"))'''
+;; ---- network: no IP ----
+(deny network*)'''
+
+# After NO_NETWORK, if present, and emitted whatever --network says.
+UNIX_SOCKETS = '''
+
+;; ---- unix sockets: none but syslog, and DNS with the network on ----
+;; Sockets in shared directories reach programs outside the sandbox that run
+;; commands for whoever connects: tmux, the Emacs server, VS Code, Postgres.
+;; Path filters match only unix sockets, so this leaves IP alone.
+(deny network* (subpath "/"))
+(allow network-outbound (literal "/private/var/run/syslog"))'''
+
+# Only with the network on: with it off, a lookup is itself a leak.
+RESOLVER = '''
+(allow network-outbound (literal "/private/var/run/mDNSResponder"))'''
 
 def build_profile(cwd: str, opts: Options) -> str:
     refuse_denied_cwd(cwd)
@@ -422,7 +433,9 @@ def build_profile(cwd: str, opts: Options) -> str:
     profile = PROFILE.format(write_rules=write_rules,
                              read_rules=read_rules,
                              device_writes=DEVICE_WRITES)
-    return profile if opts.network else profile + NO_NETWORK
+    if opts.network:
+        return profile + UNIX_SOCKETS + RESOLVER
+    return profile + NO_NETWORK + UNIX_SOCKETS
 
 
 # -------------------- RUNNING --------------------

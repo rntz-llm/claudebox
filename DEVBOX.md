@@ -21,7 +21,8 @@ devbox --print-profile            # see exactly what the profile says
 
 ## What it allows
 
-- **Writes** - the current directory, `$TMPDIR`, `/tmp`, `/var/tmp`, and the
+- **Writes** - the current directory, your per-user temp directory
+  (`getconf DARWIN_USER_TEMP_DIR`), `/tmp`, `/var/tmp`, and the
   usual writable character devices. Nothing else: not your dotfiles, not
   `~/.ssh/config`, not a launch agent, not another repo. Not `.git/config` or
   `.git/hooks` either, even though they are inside the writable directory -
@@ -36,9 +37,12 @@ devbox --print-profile            # see exactly what the profile says
   Machine disk is a copy of your home directory. `stat` is permitted
   everywhere, so path-walking still works.
 
-- **IP networking** - none, unless you pass `--network=yes`. Unix-domain
-  sockets stay reachable either way; denying them breaks the DNS resolver,
-  syslog and the pasteboard for no gain once IP is gone.
+- **IP networking** - none, unless you pass `--network=yes`.
+
+- **Unix sockets** - syslog's, plus the DNS resolver's with `--network=yes`.
+  Nothing else, either way: sockets in shared directories reach programs that
+  run commands for whoever connects - tmux, the Emacs server, VS Code. That
+  includes `ssh-agent` and Docker, so `git push` over ssh won't work inside.
 
 The two lists are shaped differently on purpose. "Files my dev environment
 reads" is long, personal and open-ended, and enumerating it produces a sandbox
@@ -77,12 +81,6 @@ anyway. Not worth a sandbox that breaks every autumn.
   `cfprefsd`, file names through Spotlight - none of those are reads by you.
   Try `git credential-osxkeychain get` before assuming your git credentials are
   out of reach.
-
-- **Unix sockets.** `ssh-agent`'s socket sits under
-  `/private/tmp/com.apple.launchd.*` and `SSH_AUTH_SOCK` is inherited, so the
-  agent will sign whatever it's asked. If you run Docker, `/var/run/docker.sock`
-  is reachable too, and the Docker API can mount `/` into a container. Neither
-  is affected by `--network=no`.
 
 - **Your environment.** It passes through as-is, so whatever your shell
   exported - `GITHUB_TOKEN`, `ANTHROPIC_API_KEY`, `AWS_SECRET_ACCESS_KEY` - is
