@@ -35,7 +35,7 @@ Writes to current directory; reads anywhere; no network. Exceptions/details:
   `~/.git-credentials`, `~/.npmrc`,
   `~/.config/gh`, `~/.claude` and friends; all of `~/Library`, which holds the
   keychain, your cookies and your mail, with the developer subtrees
-  (`Developer`, `Caches`, `Fonts`, `Android`, `Python`, `pnpm`) given back;
+  (`Developer`, `Caches`, `Fonts`, `Java`, `Python` and more) given back;
   other users' home directories; `/Volumes`, because a mounted Time Machine disk
   is a copy of your home directory. `stat` is permitted everywhere, so
   path-walking still works.
@@ -213,9 +213,6 @@ Other causes:
   install step. Run those outside.
 - **Clang/Swift module cache** is probably not writable, breaking `-fmodules`
   and Swift builds.
-- **Unreadable dev directories**: `~/Library/Java`,
-  `~/Library/org.swift.swiftpm`, `~/Library/Application
-  Support/{pip,pypoetry,Coursier}`. Use `--allow-read`.
 
 If you reach for the same flag twice, put it in `~/.config/devbox/rules`.
 

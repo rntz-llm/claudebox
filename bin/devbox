@@ -306,6 +306,12 @@ def default_directives(paths: Paths) -> list[Directive]:
         ("allow", "read",  "~/Library/Android"),
         ("allow", "read",  "~/Library/Python"),
         ("allow", "read",  "~/Library/pnpm"),
+        ("allow", "read",  "~/Library/Java"),
+        ("allow", "read",  "~/Library/org.swift.swiftpm"),
+        ("allow", "read",  "~/Library/Application Support/pip"),
+        ("allow", "read",  "~/Library/Application Support/pypoetry"),
+        ("deny",  "read",  "~/Library/Application Support/pypoetry/auth.toml"),
+        ("allow", "read",  "~/Library/Application Support/Coursier"),
         # ...except the parts of Caches that are somebody's browsing or chat history.
         ("deny",  "read",  "~/Library/Caches/com.apple.Safari"),
         ("deny",  "read",  "~/Library/Caches/Google"),
