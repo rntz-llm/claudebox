@@ -24,7 +24,7 @@ devbox --print-profile            # see exactly what the profile says
 Writes to current directory; reads anywhere; no network. Exceptions/details:
 
 - **Writes**: The current directory, your per-user temp directory (`getconf
-  DARWIN_USER_TEMP_DIR`, even if `$TMPDIR` points elsewhere), `/tmp`,
+  DARWIN_USER_TEMP_DIR`; `$TMPDIR` becomes a fresh directory inside it), `/tmp`,
   `/var/tmp`, and the usual writable character devices. Not `.git/config` or
   `.git/hooks` either, even though they are inside the writable directory - see
   below. `/tmp` is shared with your unsandboxed programs, so sandboxed code can
@@ -42,10 +42,11 @@ Writes to current directory; reads anywhere; no network. Exceptions/details:
 - **IP networking**: None, unless you pass `--network=yes`. That opens
   localhost too: Docker, databases, Chrome's debugging port.
 
-- **Unix sockets**: syslog's, plus the DNS resolver's with `--network=yes`.
-  Nothing else: sockets in shared directories reach programs that run commands
-  for whoever connects - tmux, the Emacs server, VS Code. That includes
-  `ssh-agent` and Docker, so `git push` over ssh won't work inside.
+- **Unix sockets**: syslog's, any in that fresh `$TMPDIR`, plus the DNS
+  resolver's with `--network=yes`. Nothing else: sockets in shared directories
+  reach programs that run commands for whoever connects - tmux, the Emacs
+  server, VS Code. That includes `ssh-agent` and Docker, so `git push` over ssh
+  won't work inside.
 
 The read/write lists are shaped differently on purpose. "Files my dev
 environment reads" is long, personal and open-ended, and enumerating it produces
@@ -204,8 +205,7 @@ Three cases come up often:
 
 Other causes:
 
-- **Unix sockets**, all denied, even a tool's own: watchman, turbo and nx
-  daemons, Python `multiprocessing` managers.
+- **Unix sockets** outside `$TMPDIR`, even a tool's own.
 - **Localhost** is off with the network: Gradle and Bazel daemons, test
   servers.
 - **`.git/config`** isn't writable: `git push -u`, `git remote add`, husky's

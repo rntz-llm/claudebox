@@ -16,6 +16,7 @@ import itertools
 import os
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import NoReturn
@@ -397,25 +398,28 @@ NO_NETWORK = '''
 # After NO_NETWORK, if present, and emitted whatever --network says.
 UNIX_SOCKETS = '''
 
-;; ---- unix sockets: none but syslog, and DNS with the network on ----
+;; ---- unix sockets: syslog, this run's $TMPDIR, DNS with the network on ----
 ;; Sockets in shared directories reach programs outside the sandbox that run
 ;; commands for whoever connects: tmux, the Emacs server, VS Code, Postgres.
 ;; Path filters match only unix sockets, so this leaves IP alone.
 (deny network* (subpath "/"))
-(allow network-outbound (literal "/private/var/run/syslog"))'''
+(allow network-outbound (literal "/private/var/run/syslog"))
+;; Tools' own sockets: watchman, multiprocessing. Nothing outside uses this.
+(allow network* (subpath "{run_dir}"))'''
 
 # Only with the network on: with it off, a lookup is itself a leak.
 RESOLVER = '''
 (allow network-outbound (literal "/private/var/run/mDNSResponder"))'''
 
-def build_profile(paths: Paths, opts: Options) -> str:
+def build_profile(paths: Paths, opts: Options, run_dir: str) -> str:
+    sockets     = UNIX_SOCKETS.format(run_dir=run_dir)
     directives  = ruleset(paths, opts)
     read_rules  = stanzas(rules_for("read", directives), "file-read*")
     write_rules = stanzas(rules_for("write", directives), "file-write*")
     profile = PROFILE.format(write_rules=write_rules, read_rules=read_rules)
     if opts.network:
-        return profile + UNIX_SOCKETS + RESOLVER
-    return profile + NO_NETWORK + UNIX_SOCKETS
+        return profile + sockets + RESOLVER
+    return profile + NO_NETWORK + sockets
 
 
 # -------------------- RUNNING --------------------
@@ -479,13 +483,20 @@ def main() -> int:
     cmd = rest or [os.environ.get("SHELL") or "/bin/bash"]
 
     check_reasonable(paths, opts)
-    profile = build_profile(paths, opts)
+    # This run's own $TMPDIR, inside the writable temp dir. Whatever $TMPDIR
+    # said is dropped: it may not be writable, and .envrc can set it. Left for
+    # dirhelper to clean up.
+    run_dir = os.path.realpath(
+        tempfile.mkdtemp(prefix="devbox-", dir=paths.temp_dir))
+    profile = build_profile(paths, opts, run_dir)
     if opts.print_profile:
+        os.rmdir(run_dir)
         print(profile)
         return 0
 
     # Marks the shell as sandboxed for anyone who wants to say so in a prompt.
     os.environ["DEVBOX"] = "1"
+    os.environ["TMPDIR"] = run_dir
 
     if not opts.why:
         os.execv(SANDBOX_EXEC, [SANDBOX_EXEC, "-p", profile] + cmd)
