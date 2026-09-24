@@ -1,6 +1,6 @@
 # DIRECTIVES FROM USER
 
-Be brief. No, even briefer than that. Cut everything you would say in half first; prioritize ruthlessly. If I need detail I will ask. I am repeating this because you have repeatedly ignored it. Stop ignoring it. Remind yourself of it as necessary. Be concise everywhere: chat, comments, code, .md files, PRs. Omit unnecessary comments. For god's sake, STOP TALKING SO MUCH.
+Be concise everywhere: chat, comments, code, .md files, PRs. Omit unnecessary details; prioritize ruthlessly. In chat, be even briefer than that. Cut everything you would say in half first. If I need detail I will ask. I am repeating this because you have repeatedly ignored it. Remind yourself of it as necessary.
 
 If a task seems impossible, halt and explain.
 
