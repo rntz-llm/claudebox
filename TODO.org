@@ -1,12 +1,12 @@
 * tasks
 
-** persistent state between container images on same project?
-
-add an explicit persistent space within .local/state/claudebox/<PROJECT> to allow things to stay across container restarts?
-
 ** re-use an existing container if it matches project?
 
 is there any point isolating different claudes on the same project in different claudebox containers if they share their claude config dir? if not, we should probably either go fully-temporary on containers (destroy them at end of session by default) or fully shared & persistent (keep the container around until project destroyed or explicitly pruned, and re-use that container for every `claudebox` command in the same project).
+
+** persistent state between container images on same project?
+
+add an explicit persistent space within .local/state/claudebox/<PROJECT> to allow things to stay across container restarts?
 
 ** convert claudebox, buildbox into one script with subcommands
 

@@ -8,6 +8,12 @@ Fresh per-run temp dir: mkdtemp(prefix="devbox-") inside DARWIN_USER_TEMP_DIR, a
 
 * TODOS
 
+** make (devbox) go in prompt
+
 would be nice if my prompt INDICATED I was in a devbox - like being in a venv.
 
-figure out the .zhist locking issue. can this be fixed easily? or at least prettified?
+** zhist locking issue
+
+probably just need to add .zhist to default allow-write, or find a way to get zsh not to try to write .zhist. Security concerns if .zhist is writeable?
+
+Claude wants me to note: it's determined by $HISTFILE, default is .zsh_history, also ~/.zsh_sessions which zsh writes per-session. Any fix should cover shell's history locations generally.
