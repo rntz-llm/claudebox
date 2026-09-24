@@ -1,8 +1,10 @@
 * tasks
 
-** re-use an existing container if it matches project?
+** avoid littering containers around
 
-is there any point isolating different claudes on the same project in different claudebox containers if they share their claude config dir? if not, we should probably either go fully-temporary on containers (destroy them at end of session by default) or fully shared & persistent (keep the container around until project destroyed or explicitly pruned, and re-use that container for every `claudebox` command in the same project).
+claudebox always tries to create a new container and it never removes them. This is dumb.
+
+Probably I should have one container per project dir and re-use it if it already exists. Alternatively, go fully-temporary and use --rm: destroy containers at end of session. I lean towards one persistent container per project.
 
 ** persistent state between container images on same project?
 
