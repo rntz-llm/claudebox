@@ -126,6 +126,7 @@ class Options:
     directives: list[Directive] = field(default_factory=list)
     print_profile: bool = False
     why: bool = False
+    help: bool = False
 
 DIRECTIVES = ("allow-read", "deny-read", "allow-write", "deny-write")
 VALUE_FLAGS = ("--network",) + tuple("--" + d for d in DIRECTIVES)
@@ -160,8 +161,8 @@ def parse_args(argv: list[str]) -> tuple[Options, list[str]]:
         elif arg == "--print-profile":
             opts.print_profile = True
         elif arg in ("-h", "--help"):
-            sys.stdout.write(USAGE)
-            sys.exit(0)
+            opts.help = True
+            return opts, []
         elif arg == "--":
             i += 1
             break
@@ -487,21 +488,25 @@ def refuse_unreasonable_cwd(cwd: str) -> None:
             "directory, not a home directory or the root of the filesystem.")
 
 def main() -> int:
-    # sandbox-exec is macOS-only.
     if os.uname().sysname != "Darwin":
         die(f"macOS only -- sandbox-exec doesn't exist on {os.uname().sysname}.")
     if not os.access(SANDBOX_EXEC, os.X_OK):
         die(f"{SANDBOX_EXEC} is missing; nothing to sandbox with.")
 
-    cwd = os.getcwd()
     opts, rest = parse_args(sys.argv[1:])
-    check_flag_rules(opts.directives)
     cmd = rest or [os.environ.get("SHELL") or "/bin/bash"]
+    if opts.help:
+        sys.stdout.write(USAGE)
+        return 0
+    # Check for --allow/deny flags on nonexistent paths (likely typos).
+    check_flag_rules(opts.directives)
 
+    cwd = os.getcwd()
+    # Refuse to run in a homedir or root dir; a dangerous mistake.
     refuse_unreasonable_cwd(cwd)
     vet(cwd)  # the profile will quote it; fail now if it can't be quoted
-    profile = build_profile(cwd, opts)
 
+    profile = build_profile(cwd, opts)
     if opts.print_profile:
         print(profile)
         return 0
