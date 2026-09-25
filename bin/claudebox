@@ -23,6 +23,7 @@ import pwd
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -71,17 +72,10 @@ def ask(question: str, stream=None) -> str:
 def confirm(question: str) -> bool:
     return ask(question).startswith(("y", "Y"))
 
-def resolve_self() -> Path:
-    """This script's real path, symlinks resolved.
-
-    bin/ is meant to go on your PATH, so it is usually reached through a
-    symlink; the directory of the *link* is the wrong place to look for
-    buildbox, and the wrong thing to compare the workspace against.
-    """
-    script = Path(os.path.realpath(__file__))
-    if not script.is_file():  # broken link, or a loop realpath gave up on
-        raise Fail(f"Refusing to run: can't resolve ‘{__file__}’ to a real file.")
-    return script
+# bin/ is meant to go on your PATH, so this script is usually reached through a
+# symlink; the directory of the *link* is the wrong place to look for buildbox,
+# and the wrong thing to compare the workspace against.
+SCRIPT_DIR = Path(os.path.realpath(__file__)).parent
 
 
 # ---------- WORKSPACE (CURRENT) DIRECTORY MUST BE REASONABLE ----------
@@ -89,9 +83,6 @@ def resolve_self() -> Path:
 # 2. No home dirs or parents of homedirs.
 # 3. Doesn't contain claudebox's own scripts.
 # 4. Must be owned by current user.
-
-def is_same_or_ancestor(ancestor: str, path: str) -> bool:
-    return os.path.commonpath([ancestor, path]) == ancestor
 
 def check_mountable(path) -> None:
     if "," in str(path) or "=" in str(path):
@@ -106,10 +97,10 @@ def user_name(uid: int) -> str:
     except KeyError:
         return str(uid)
 
-def check_workspace(cwd: str, script_dir: Path) -> None:
+def check_workspace(cwd: str) -> None:
     check_mountable(cwd)
 
-    if is_same_or_ancestor(cwd, str(script_dir)):
+    if SCRIPT_DIR.is_relative_to(cwd):
         raise Fail(
             f"Refusing to mount ‘{cwd}’ as /workspace: it contains claudebox's own scripts."
         )
@@ -156,8 +147,8 @@ def mount_option(source, target: str, readonly: bool = False) -> str:
 # An inference-only token (see `claudebox token`) beats a /login credential
 # here: it can only run models, so reading it buys a prompt injection no
 # connectors, cloud sessions or Remote Control.  It's mounted read-only, denied
-# to sandboxed commands by image/claude-settings.json, and fed to claude on a
-# pipe by the image's bin/claude.
+# to sandboxed commands by image/claude-managed-settings.json, and fed to claude
+# on a pipe by image/claude-wrapper.
 
 def have_security() -> bool:
     return os.path.exists(SECURITY)
@@ -188,18 +179,16 @@ def keychain_store_token(token: str) -> None:
         )
 
 
-def atomic_write(path: Path, data: bytes, times_ns=None) -> None:
+def atomic_write(path: Path, data: bytes) -> None:
     """Replace `path` (mode 0600) by renaming a synced temp file over it, so a
     failure leaves the old contents whole."""
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
-        if times_ns:
-            os.utime(tmp, ns=times_ns)
-        os.replace(tmp, str(path))
+        os.replace(tmp, path)
     except BaseException:
         try:
             os.unlink(tmp)
@@ -265,7 +254,7 @@ def image_exists() -> bool:
     proc = subprocess.run(["container", "image", "list"], stdout=subprocess.PIPE, text=True)
     if proc.returncode != 0:
         raise Fail("Refusing to run: `container image list` failed.")
-    return any(re.match(r"claude\b", line) for line in proc.stdout.splitlines())
+    return any(re.match(rf"{re.escape(IMAGE)}\b", line) for line in proc.stdout.splitlines())
 
 def run_container(argv: list) -> int:
     """`container run`, waited for the way bash waits: Ctrl-C reaches the
@@ -278,12 +267,11 @@ def run_container(argv: list) -> int:
             pass
 
 def cmd_run(args: list) -> int:
-    script_dir = resolve_self().parent
     try:
         cwd = os.getcwd()
     except OSError as e:
         raise Fail(f"Refusing to run: can't determine the current directory ({e.strerror}).")
-    check_workspace(cwd, script_dir)
+    check_workspace(cwd)
     if shutil.which("container") is None:
         raise Fail("Refusing to run: no `container` on PATH. Is it installed?")
 
@@ -306,75 +294,68 @@ def cmd_run(args: list) -> int:
             try: token = store_token_interactively()
             except Fail as e: warn(str(e))
 
-    secret_dir = ""
-    try:
+    creds = state_dir / "claude" / ".credentials.json"
+    if token and creds.is_file() and sys.stdin.isatty():
+        offer_login_credential_removal(creds)
+
+    # Arguments are passed through untouched, --name included: if you
+    # supplied one that's the name, and a name that's already taken is
+    # `container run`'s complaint to make, not ours.  Only when there's no
+    # --name do we pick one from the directory name, suffixed so that
+    # concurrent boxes don't collide.
+    if not any(a == "--name" or a.startswith("--name=") for a in args):
+        name = pick_container_name(cwd)
+        print(f"Container name: ‘{name}’")
+        container_options += ["--name", name]
+
+    # Side effects only from here on, so a refusal above leaves nothing behind.
+    state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    (state_dir / "claude").mkdir(mode=0o700, exist_ok=True)
+    write_path_file(state_dir, cwd)  # its mtime records the last launch
+
+    if image_exists():
+        print(f"Image ‘{IMAGE}’ already built, reusing.")
+    else:
+        # --no-cache because the Dockerfile pins neither node nor rust, and
+        # a cached layer would keep whatever version it first resolved.
+        # See BUILD_CACHING_IS_PROBLEMATIC.md.
+        build = subprocess.run([SCRIPT_DIR / "buildbox", "--no-cache"])
+        if build.returncode != 0:
+            return build.returncode
+
+    with tempfile.TemporaryDirectory() as secret_dir:  # 0700
         if token:
-            secret_dir = tempfile.mkdtemp()  # 0700
-            fd = os.open(os.path.join(secret_dir, SECRET_NAME),
-                         os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(fd, "w") as f:
-                f.write(token + "\n")
+            atomic_write(Path(secret_dir) / SECRET_NAME, (token + "\n").encode())
             container_options += [
                 "--mount", mount_option(secret_dir, SECRET_TARGET, readonly=True)
             ]
-            creds = state_dir / "claude" / ".credentials.json"
-            if creds.is_file() and sys.stdin.isatty():
-                offer_login_credential_removal(creds)
-
-        # Arguments are passed through untouched, --name included: if you
-        # supplied one that's the name, and a name that's already taken is
-        # `container run`'s complaint to make, not ours.  Only when there's no
-        # --name do we pick one from the directory name, suffixed so that
-        # concurrent boxes don't collide.
-        if not any(a == "--name" or a.startswith("--name=") for a in args):
-            name = pick_container_name(cwd)
-            print(f"Container name: ‘{name}’")
-            container_options += ["--name", name]
-
-        # Side effects only from here on, so a refusal above leaves nothing behind.
-        state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        (state_dir / "claude").mkdir(mode=0o700, exist_ok=True)
-        write_path_file(state_dir, cwd)  # its mtime records the last launch
-
-        if image_exists():
-            print(f"Image ‘{IMAGE}’ already built, reusing.")
-        else:
-            # --no-cache because the Dockerfile pins neither node nor rust, and
-            # a cached layer would keep whatever version it first resolved.
-            # See BUILD_CACHING_IS_PROBLEMATIC.md.
-            build = subprocess.run([str(script_dir / "buildbox"), "--no-cache"])
-            if build.returncode != 0:
-                return build.returncode
-
         # Not echoing the command b/c "-e GH_TOKEN=..." is common, don't want
         # that PAT displayed.
         return run_container(["container", "run"] + container_options + args + [IMAGE])
-    finally:
-        if secret_dir:
-            shutil.rmtree(secret_dir, ignore_errors=True)
 
 
 # ---------- claudebox gc ----------
 def disk_usage(path: Path) -> str:
-    proc = subprocess.run(["/usr/bin/du", "-sh", str(path)],
+    proc = subprocess.run(["/usr/bin/du", "-sh", path],
                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
     return proc.stdout.split("\t")[0] or "?"
 
 def read_path_file(path_file: Path) -> str:
     return os.fsdecode(path_file.read_bytes().rstrip(b"\n"))
 
-def write_path_file(state_dir: Path, project: str, times_ns=None) -> None:
-    atomic_write(state_dir / "path", os.fsencode(project) + b"\n", times_ns)
+def write_path_file(state_dir: Path, project: str) -> None:
+    atomic_write(state_dir / "path", os.fsencode(project) + b"\n")
 
 def move_state(directory: Path, new_path: str) -> None:
     dest = directory.parent / state_key(new_path)
     if dest.exists():
         warn(f"‘{new_path}’ already has state in ‘{dest}’; skipping.")
         return
-    os.rename(str(directory), str(dest))
+    directory.rename(dest)
     # Keep the old mtime: it records the last launch.
     st = (dest / "path").stat()
-    write_path_file(dest, new_path, (st.st_atime_ns, st.st_mtime_ns))
+    write_path_file(dest, new_path)
+    os.utime(dest / "path", ns=(st.st_atime_ns, st.st_mtime_ns))
     print(f"Moved to ‘{dest}’.")
 
 def new_path_for(tty) -> str:
@@ -387,7 +368,7 @@ def new_path_for(tty) -> str:
         warn(f"‘{path}’ is not a directory; skipping.")
         return ""
     try:
-        check_workspace(path, resolve_self().parent)  # what `run` would accept
+        check_workspace(path)  # what `run` would accept
     except Fail as e:
         warn(f"{e} Skipping.")
         return ""
@@ -410,18 +391,17 @@ def cmd_gc(args: list) -> int:
     for directory in sorted(p for p in root.iterdir() if p.is_dir()):
         size = disk_usage(directory)
         path_file = directory / "path"
-        if path_file.is_file():
-            try:
-                path = read_path_file(path_file)
-                used = datetime.fromtimestamp(path_file.stat().st_mtime).strftime("%Y-%m-%d")
-            except OSError as e:
-                path, used = f"? (can't read ‘{path_file}’: {e.strerror})", "?"
-            else:
-                if not os.path.isdir(path):
-                    orphans.append((directory, path))
-                    path += " (gone)"
-        else:
+        try:
+            path = read_path_file(path_file)
+            used = datetime.fromtimestamp(path_file.stat().st_mtime).strftime("%Y-%m-%d")
+        except FileNotFoundError:
             path, used = f"? (no path file in ‘{directory}’)", "?"
+        except OSError as e:
+            path, used = f"? (can't read ‘{path_file}’: {e.strerror})", "?"
+        else:
+            if not os.path.isdir(path):
+                orphans.append((directory, path))
+                path += " (gone)"
         print(f"{size:>6}  {used:<10}  {path}")
 
     if not orphans:
@@ -441,7 +421,7 @@ def cmd_gc(args: list) -> int:
                 "new path, or [s]kip? ", tty)
             if answer == "d":
                 try:
-                    shutil.rmtree(str(directory))
+                    shutil.rmtree(directory)
                 except OSError as e:
                     warn(f"Couldn't delete ‘{directory}’ ({e.strerror}); left it alone.")
                 else:
@@ -558,6 +538,11 @@ def main(argv: list) -> int:
     # Line buffering keeps our output in step with the subprocesses that share
     # the terminal (`claude setup-token`, buildbox, `container run`).
     sys.stdout.reconfigure(line_buffering=True)
+
+    # Closing the terminal or a `kill` would otherwise end us without running
+    # `finally` blocks, leaving the token's temp copy on disk.
+    for sig in (signal.SIGHUP, signal.SIGTERM):
+        signal.signal(sig, lambda signum, _frame: sys.exit(128 + signum))
 
     # A bare word is never a valid `container run` option -- the image name is
     # ours to supply -- so reserving these can't shadow a pass-through argument.

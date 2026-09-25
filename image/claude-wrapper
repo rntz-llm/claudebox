@@ -11,7 +11,7 @@ secret=/run/claudebox-secrets/oauth-token
 claude=/home/agent/.local/bin/claude
 
 unset CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR
-if [ -r "$secret" ] && token="$(cat "$secret" 2>/dev/null)" && [ -n "$token" ]; then
+if token="$(cat "$secret" 2>/dev/null)" && [ -n "$token" ]; then
     export CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=9
     exec 9<<EOF
 $token
