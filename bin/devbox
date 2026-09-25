@@ -205,8 +205,8 @@ def read_config(config_file: str) -> list[Directive]:
         line = line.lstrip()
         if not line or line.startswith("#"):
             continue
-        word, _, path = line.partition(" ")
-        path = path.lstrip()
+        word, *rest = line.split(None, 1)
+        path = rest[0] if rest else ""
         if word not in DIRECTIVES:
             die(f"{config_file}:{n}: expected one of "
                 f"{', '.join(DIRECTIVES)}, got ‘{word}’")
@@ -216,7 +216,14 @@ def read_config(config_file: str) -> list[Directive]:
             die(f"{config_file}:{n}: file path has trailing white space; ambiguous.\n"
                 "If your file path actually ends in white space, sorry, can't handle that yet.\n"
                 "Otherwise, remove trailing spaces.")
+        if " #" in path or "\t#" in path:
+            die(f"{config_file}:{n}: ‘#’ after white space; comments must be "
+                "whole lines.")
         action, _, op = word.partition("-")
+        # A mistyped deny silently protects nothing.
+        if action == "deny" and not os.path.exists(os.path.expanduser(path)):
+            print(f"{PROG}: warning: {config_file}:{n}: ‘{path}’ doesn't "
+                  "exist.", file=sys.stderr)
         directives.append((action, op, path))
     return directives
 

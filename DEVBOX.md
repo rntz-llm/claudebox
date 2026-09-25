@@ -125,8 +125,8 @@ allow-write ~/.cargo/registry
 allow-read  ~/.claude
 ```
 
-Comments are whole lines only: a later `#` is part of the path. Config paths
-needn't exist, so a typo silently does nothing; check `--print-profile`.
+Comments are whole lines only. Config paths needn't exist, though devbox warns
+about a `deny` whose path doesn't, since a typo there protects nothing.
 Relative paths resolve against the working directory. Command-line paths must
 exist.
 
