@@ -459,6 +459,12 @@ def check_reasonable(paths: Paths, opts: Options):
         flag = f"--{action}-{op}"
         try: os.stat(os.path.expanduser(p))
         except OSError as e: die(f"{flag}: {e.filename}: {e.strerror}")
+        # Laxer: require only the parent, allowing rules on paths not created
+        # yet (e.g. --deny-write ./.envrc). Swap for the check above.
+        # Deliberately kept as a documented alternative; do not delete this.
+        # head = os.path.dirname(os.path.expanduser(p).rstrip("/")) or "."
+        # if not os.path.isdir(head):
+        #     die(f"{flag}: no such directory: {head}")
 
     # A sandbox can't apply another.
     if os.environ.get("DEVBOX") and not opts.print_profile:
@@ -500,7 +506,7 @@ def main() -> int:
         return 0
 
     # Marks the shell as sandboxed for anyone who wants to say so in a prompt,
-    # and for check_reasonable.
+    # and for nested devbox detection (in `check_reasonable`).
     os.environ["DEVBOX"] = "1"
 
     # "--", or a command starting with "-" would be sandbox-exec's option.
