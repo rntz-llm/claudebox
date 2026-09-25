@@ -231,8 +231,10 @@ def read_config(config_file: str) -> list[Directive]:
 # catches a lot.
 #
 # The downside is that a secret nobody deny-listed stays readable, and turning
-# the network off barely slows its exfiltration: `open "https://..."` still
-# works. See DEVBOX.md.
+# the network off only slows its exfiltration: code can still get a daemon
+# outside the sandbox to reach the network for it (LaunchServices through its
+# API opens a URL; other services likely do DNS lookups and fetches on
+# request), or leave the secret in the repo for your next push. See DEVBOX.md.
 
 def default_directives(paths: Paths) -> list[Directive]:
     """The built-in policy, lowest precedence. Last match wins."""

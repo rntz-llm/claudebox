@@ -56,9 +56,11 @@ legitimately writes outside the repo and its caches, so denying by default costs
 little and catches a lot.
 
 The price is that a secret somewhere nobody listed stays readable. Turning the
-network off by default makes exfiltration only slightly harder: e.g. `open
-"https://.../${SECRET}"` is not blocked. *Don't use devbox to contain serious
-attackers; it won't work.*
+network off by default makes exfiltration harder, not impossible. The `open`
+command is denied, but code calling LaunchServices directly can still open
+`https://.../${SECRET}`, other system services likely do DNS lookups and fetches
+on request, and a secret written into the repo leaves with your next push.
+*Don't use devbox to contain serious attackers; it won't work.*
 
 Everything that is not a file or a socket - running programs, mach services,
 sysctls - is permitted, because the profile is `(allow default)` with
