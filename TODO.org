@@ -23,7 +23,7 @@ would be nice to have a better way to grant tightly scoped github permissions th
 
 ** make it easy to use a less broadly scoped claude token
 
-Done: claudebox-token stores a `claude setup-token` token in the keychain; claudebox mounts
+Done: `claudebox token set` stores a `claude setup-token` token in the keychain; claudebox mounts
 it and the image's bin/claude feeds it to claude on fd 9. Untested on macOS -- check that
 claude starts without /login, that .credentials.json stays absent, and that the keychain
 read doesn't prompt every launch.

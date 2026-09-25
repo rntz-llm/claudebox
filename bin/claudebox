@@ -1,27 +1,88 @@
-#!/bin/bash
+#!/usr/bin/python3 -I
+"""Run Claude Code in an Apple container, one sandbox per project.
 
-set -euo pipefail
+Subcommands: `run` (the default), `gc`, `token`.
 
-# Resolve the script path through symlinks before taking its directory. Without
-# this, invoking a symlink to this script -- the obvious thing to do once bin/
-# is meant to be on your PATH -- computes the wrong script_dir: the buildbox
-# lookup below misses, and worse, the containment check passes for a workspace
-# that really does hold these scripts. macOS has no portable `readlink -f`.
-script="${BASH_SOURCE[0]}"
-links=0
-while [[ -L "$script" ]]; do
-    if (( ++links > 40 )); then
-        echo "Refusing to run: ‘${BASH_SOURCE[0]}’ is more than 40 symlinks deep; a loop?" >&2
-        exit 1
-    fi
-    target="$(readlink "$script")"
-    case "$target" in
-        /*) script="$target" ;;
-        *)  script="$(cd "$(dirname "$script")" && pwd -P)/$target" ;;
-    esac
-done
-script_dir="$(cd "$(dirname "$script")" && pwd -P)"
-cwd="$(pwd -P)"
+macOS only: it drives `container` and `security`, and its refusal to mount a
+home directory knows only about /Users.  Needs the Command Line Tools for
+/usr/bin/python3 (3.9 is enough).
+
+Uses /usr/bin/python3 rather than `env python3` to prevent pyenv/asdf shims and
+auto-activated project virtualenvs from deciding what `python3` means (eg a malicious
+`.venv/bin/python3`).
+
+Pass -I (isolated) to drop PYTHONPATH/PYTHONHOME, user site directory, and script's own
+directory from sys.path, just to be paranoid.
+"""
+
+import getpass
+import hashlib
+import json
+import os
+import pwd
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+from datetime import datetime
+from pathlib import Path, PurePosixPath
+
+IMAGE = "claude"                # TODO: change to "claudebox"
+KEYCHAIN_SERVICE = "claudebox"
+KEYCHAIN_ACCOUNT = "oauth-token"
+KEYCHAIN_ITEM = ["-s", KEYCHAIN_SERVICE, "-a", KEYCHAIN_ACCOUNT]
+SECURITY = "/usr/bin/security"
+SECRET_TARGET = "/run/claudebox-secrets"
+SECRET_NAME = "oauth-token"
+
+# The keys `/logout` drops, leaving mcpOAuth (per-server MCP logins) alone.
+LOGIN_CREDENTIAL_KEYS = (
+    "claudeAiOauth",
+    "organizationUuid",
+    "trustedDeviceToken",
+    "enterpriseGateway",
+    "designOauth",
+)
+
+# What may go into the `security -i` command line below without quoting turning
+# into a guess.  Real tokens are `sk-ant-...` base64url; anything else is
+# refused rather than stored mangled.
+TOKEN_SAFE = re.compile(r"\A[A-Za-z0-9._~+/=:-]+\Z")
+
+class Fail(Exception):
+    """An error to report and exit 1 on."""
+
+def warn(message: str) -> None:
+    print(message, file=sys.stderr)
+
+def ask(question: str, stream=None) -> str:
+    """Prompt on stderr and read a line, like bash `read -p`.
+
+    End of input answers with the empty string, so every caller's default is
+    the one that changes nothing.
+    """
+    stream = stream or sys.stdin
+    sys.stderr.write(question)
+    sys.stderr.flush()
+    return stream.readline().rstrip("\n")
+
+def confirm(question: str) -> bool:
+    return ask(question).startswith(("y", "Y"))
+
+def resolve_self() -> Path:
+    """This script's real path, symlinks resolved.
+
+    bin/ is meant to go on your PATH, so it is usually reached through a
+    symlink; the directory of the *link* is the wrong place to look for
+    buildbox, and the wrong thing to compare the workspace against.
+    """
+    script = Path(os.path.realpath(__file__))
+    if not script.is_file():  # broken link, or a loop realpath gave up on
+        raise Fail(f"Refusing to run: can't resolve ‘{__file__}’ to a real file.")
+    return script
+
 
 # ---------- WORKSPACE (CURRENT) DIRECTORY MUST BE REASONABLE ----------
 # 1. No commas or equals signs (they'd break --mount's option syntax).
@@ -29,176 +90,496 @@ cwd="$(pwd -P)"
 # 3. Doesn't contain claudebox's own scripts.
 # 4. Must be owned by current user.
 
-if [[ "$cwd" == *[,=]* ]]; then
-    echo "Refusing to mount ‘${cwd}’ as /workspace: its path contains a comma or equals sign, which --mount cannot express." >&2
-    exit 1
-fi
+def is_same_or_ancestor(ancestor: str, path: str) -> bool:
+    return os.path.commonpath([ancestor, path]) == ancestor
 
-# Is $1 the same directory as $2, or one of its ancestors?
-is_same_or_ancestor() {
-    local ancestor="${1%/}" path="${2%/}"
-    [[ "$path" == "$ancestor" || "$path" == "$ancestor"/* ]]
-}
+def check_mountable(path) -> None:
+    if "," in str(path) or "=" in str(path):
+        raise Fail(
+            f"Refusing to mount ‘{path}’: its path contains a comma or equals "
+            "sign, which --mount cannot express."
+        )
 
-if is_same_or_ancestor "$cwd" "$script_dir"; then
-    echo "Refusing to mount ‘${cwd}’ as /workspace: it contains claudebox's own scripts." >&2
-    exit 1
-fi
+def user_name(uid: int) -> str:
+    try:
+        return pwd.getpwuid(uid).pw_name
+    except KeyError:
+        return str(uid)
 
-# On macOS every home directory is /Users/<name>, so anything at or above that
-# level is either a home directory or holds all of them.
-case "$cwd" in
-    /Users/*/*) ;;  # somewhere inside a home directory: fine
-    /|/Users|/Users/*)
-        echo "Refusing to mount ‘${cwd}’ as /workspace: mount a project directory, not a home directory or the root of the filesystem." >&2
-        exit 1
-        ;;
-esac
+def check_workspace(cwd: str, script_dir: Path) -> None:
+    check_mountable(cwd)
 
-if [[ ! -O "$cwd" ]]; then
-    echo "Refusing to mount ‘${cwd}’ as /workspace: it is owned by ‘$(stat -f %Su "$cwd")’, not ‘$(id -un)’." >&2
-    exit 1
-fi
+    if is_same_or_ancestor(cwd, str(script_dir)):
+        raise Fail(
+            f"Refusing to mount ‘{cwd}’ as /workspace: it contains claudebox's own scripts."
+        )
+
+    # On macOS every home directory is /Users/<name>, so anything at or above
+    # that level is either a home directory or holds all of them.
+    parts = PurePosixPath(cwd).parts
+    if cwd == "/" or (parts[:2] == ("/", "Users") and len(parts) < 4):
+        raise Fail(
+            f"Refusing to mount ‘{cwd}’ as /workspace: mount a project directory, "
+            "not a home directory or the root of the filesystem."
+        )
+
+    try:
+        st = os.stat(cwd)
+    except OSError as e:
+        raise Fail(f"Refusing to mount ‘{cwd}’ as /workspace: {e.strerror}.")
+    if st.st_uid != os.getuid():
+        raise Fail(
+            f"Refusing to mount ‘{cwd}’ as /workspace: it is owned by "
+            f"‘{user_name(st.st_uid)}’, not ‘{user_name(os.getuid())}’."
+        )
+
 # ---------- END WORKSPACE DIR CHECKS ----------
 
-# Per-project Claude state (memories, transcripts, login), keyed by host path so
-# projects don't share it. claudebox-gc cleans up after moved/deleted projects.
-hash="$(printf %s "$cwd" | shasum -a 256 | cut -c1-12)"
-state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/claudebox/projects/$(basename "$cwd")-$hash"
-if [[ "$state_dir" == *[,=]* ]]; then
-    echo "Refusing to mount ‘${state_dir}’: its path contains a comma or equals sign, which --mount cannot express." >&2
-    exit 1
-fi
+def state_key(path: str) -> str:
+    """Directory name for a project's state: basename plus a hash of the path."""
+    digest = hashlib.sha256(os.fsencode(path)).hexdigest()[:12]
+    return f"{os.path.basename(path)}-{digest}"
 
-container_options=(
-    --interactive
-    --tty
-    --mount "type=bind,source=$cwd,target=/workspace"
-    --mount "type=bind,source=$state_dir/claude,target=/home/agent/.claude"
-)
+def state_root() -> Path:
+    root = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    if not os.path.isabs(root):
+        raise Fail(f"Refusing to run: XDG_STATE_HOME (‘{root}’) is not an absolute path.")
+    return Path(root) / "claudebox" / "projects"
+
+def mount_option(source, target: str, readonly: bool = False) -> str:
+    check_mountable(source)
+    option = f"type=bind,source={source},target={target}"
+    return option + ",readonly" if readonly else option
+
 
 # ---------- CLAUDE AUTH TOKEN ----------
-# An inference-only token (see bin/claudebox-token) beats a /login credential
+# An inference-only token (see `claudebox token`) beats a /login credential
 # here: it can only run models, so reading it buys a prompt injection no
-# connectors, cloud sessions or Remote Control. It's mounted read-only, denied
+# connectors, cloud sessions or Remote Control.  It's mounted read-only, denied
 # to sandboxed commands by image/claude-settings.json, and fed to claude on a
 # pipe by the image's bin/claude.
-secret_dir=
-trap '[[ -n "$secret_dir" ]] && rm -rf "$secret_dir"' EXIT
 
-token="$("$script_dir/claudebox-token" get 2>/dev/null)" || token=
-if [[ -z "$token" && -t 0 ]]; then
-    echo "No Claude token stored; ‘claude’ will ask you to /login in the container."
-    read -r -p "Create one now with claudebox-token? [y/N] " reply
-    if [[ "$reply" == [yY]* ]]; then
-        "$script_dir/claudebox-token" set || true
-        token="$("$script_dir/claudebox-token" get 2>/dev/null)" || token=
-    fi
-fi
+def have_security() -> bool:
+    return os.path.exists(SECURITY)
 
-if [[ -n "$token" ]]; then
-    secret_dir="$(mktemp -d)"
-    if [[ "$secret_dir" == *[,=]* ]]; then
-        echo "Refusing to mount ‘${secret_dir}’: its path contains a comma or equals sign, which --mount cannot express." >&2
-        exit 1
-    fi
-    (umask 077; printf '%s\n' "$token" > "$secret_dir/oauth-token")
-    container_options+=(--mount "type=bind,source=$secret_dir,target=/run/claudebox-secrets,readonly")
-fi
-token=
+def keychain_get_token() -> str:
+    """The stored token, or "" if there is none (or no keychain to ask)."""
+    if not have_security(): return None
+    proc = subprocess.run(
+        [SECURITY, "find-generic-password", *KEYCHAIN_ITEM, "-w"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+    )
+    return proc.stdout.rstrip("\n") if proc.returncode == 0 else ""
 
-# Same keys `/logout` drops, leaving mcpOAuth (per-server MCP logins) alone. No
-# backup: a copy would preserve the very token being removed. The temp file is
-# renamed over the original, so a failure can't lose the other credentials.
-remove_login_credential() {
-    local f="$1" tmp k
-    tmp="$(mktemp "$(dirname "$f")/.credentials.XXXXXX")" || return 1
-    chmod 600 "$tmp"
-    if command -v jq >/dev/null; then
-        jq 'del(.claudeAiOauth, .organizationUuid, .trustedDeviceToken, .enterpriseGateway, .designOauth)' \
-            "$f" > "$tmp" || { rm -f "$tmp"; return 1; }
-    elif command -v plutil >/dev/null; then
-        # macOS has no jq, but plutil reads and writes JSON.
-        cat "$f" > "$tmp"
-        plutil -convert json "$tmp" >/dev/null 2>&1 || { rm -f "$tmp"; return 1; }
-        for k in claudeAiOauth organizationUuid trustedDeviceToken enterpriseGateway designOauth; do
-            plutil -remove "$k" "$tmp" >/dev/null 2>&1 || true  # absent key: fine
-        done
-        plutil -lint "$tmp" >/dev/null 2>&1 || { rm -f "$tmp"; return 1; }
-    else
-        rm -f "$tmp"
-        return 2
-    fi
-    mv "$tmp" "$f"
-}
 
-# claude prefers the token, but a 401 sends it back to a stored login, so a
-# leftover one quietly undoes the point of the token.
-creds="$state_dir/claude/.credentials.json"
-if [[ -n "$secret_dir" && -f "$creds" && -t 0 ]] && LC_ALL=C grep -q claudeAiOauth "$creds"; then
-    echo "This project still holds a /login credential (full-scope, refreshable):"
-    echo "  $creds"
-    read -r -p "Remove it? MCP server logins are kept. [y/N] " reply
-    if [[ "$reply" == [yY]* ]]; then
-        if remove_login_credential "$creds"; then
-            echo "Removed. This does NOT revoke it: sign out of all sessions at claude.ai > Settings."
-        elif (( $? == 2 )); then
-            echo "Neither jq nor plutil found; remove it yourself." >&2
-        else
-            echo "Couldn't rewrite ‘${creds}’; left it alone." >&2
-        fi
-    fi
-fi
+def keychain_store_token(token: str) -> None:
+    # Piped to `security -i` rather than passed as arguments: a password on a
+    # command line shows up in `ps`.  The token is checked against TOKEN_SAFE
+    # first and read back after, so a quoting surprise can't pass unnoticed.
+    line = "add-generic-password -U {} -w {}\n".format(
+        " ".join(map(shlex.quote, KEYCHAIN_ITEM)), shlex.quote(token))
+    proc = subprocess.run([SECURITY, "-i"], input=line, text=True)
+    if proc.returncode != 0:
+        raise Fail("claudebox token: `security` refused to store the token; keychain unchanged.")
+    if keychain_get_token() != token:
+        raise Fail(
+            "claudebox token: the keychain didn't give back what we stored. "
+            "Check it in Keychain Access before relying on it."
+        )
+
+
+def atomic_write(path: Path, data: bytes, times_ns=None) -> None:
+    """Replace `path` (mode 0600) by renaming a synced temp file over it, so a
+    failure leaves the old contents whole."""
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        if times_ns:
+            os.utime(tmp, ns=times_ns)
+        os.replace(tmp, str(path))
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def offer_login_credential_removal(creds: Path) -> None:
+    """claude prefers the token, but a 401 sends it back to a stored login, so a
+    leftover one quietly undoes the point of the token."""
+    try:
+        data = json.loads(creds.read_bytes())
+    except (OSError, ValueError):
+        data = None
+    if not isinstance(data, dict):
+        warn(f"Couldn't read ‘{creds}’ to check it for a /login credential; leaving it alone.")
+        return
+    if not any(k in data for k in LOGIN_CREDENTIAL_KEYS):
+        return
+
+    print("This project still holds a /login credential (full-scope, refreshable):")
+    print(f"  {creds}")
+    if not confirm("Remove it? MCP server logins are kept. [y/N] "):
+        return
+    for key in LOGIN_CREDENTIAL_KEYS:
+        data.pop(key, None)
+    # No backup: a copy would preserve the very token being removed.
+    try:
+        atomic_write(creds, json.dumps(data, indent=2).encode() + b"\n")
+    except OSError as e:
+        warn(f"Couldn't rewrite ‘{creds}’ ({e.strerror}); left it alone.")
+    else:
+        print("Removed. This does NOT revoke it: sign out of all sessions at claude.ai > Settings.")
+
+
 # ---------- END CLAUDE AUTH TOKEN ----------
 
-# Arguments are passed through untouched, --name included: if you supplied one
-# that's the name, and a name that's already taken is `container run`'s
-# complaint to make, not ours. Only when there's no --name do we pick one from
-# the directory name, suffixed so that concurrent boxes don't collide.
-name_given=no
-for arg in "$@"; do
-    case "$arg" in
-        --name|--name=*) name_given=yes; break ;;
-    esac
-done
+def container_name_base(directory_name: str) -> str:
+    """A short [a-z0-9_-] label, since names may become DNS hostnames."""
+    name = re.sub(r"[^a-z0-9_-]", "-", directory_name.lower())
+    name = re.sub(r"-+", "-", name)[:50]
+    return re.sub(r"(\A[^a-z0-9]+|[^a-z0-9]+\Z)", "", name)
 
-if [[ "$name_given" == no ]]; then
-    # Names may become DNS hostnames, so stick to a short [a-z0-9_-] label.
-    base="$(basename "$cwd" | LC_ALL=C tr '[:upper:]' '[:lower:]' \
-        | LC_ALL=C sed -e 's/[^a-z0-9_-]/-/g' -e 's/--*/-/g' \
-        | cut -c1-50 | LC_ALL=C sed -e 's/^[^a-z0-9]*//' -e 's/[^a-z0-9]*$//')"
-    if [[ -z "$base" ]]; then
-        echo "Refusing to run: can't make a container name from ‘$(basename "$cwd")’; pass --name." >&2
-        exit 1
-    fi
-    for candidate in "$base" "$base"-{1..99}; do
-        if ! container inspect "$candidate" >/dev/null 2>&1; then
-            name="$candidate"
-            break
-        fi
-    done
-    if [[ -z "${name:-}" ]]; then
-        echo "Refusing to run: ‘${base}’ through ‘${base}-99’ are all taken; pass --name." >&2
-        exit 1
-    fi
-    echo "Container name: ‘${name}’"
-    container_options+=(--name "$name")
-fi
+def name_taken(name: str) -> bool:
+    return subprocess.run(
+        ["container", "inspect", name],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    ).returncode == 0
 
-# Side effects only from here on, so a refusal above leaves nothing behind.
-mkdir -p "$state_dir/claude"
-# Its mtime records the last launch.
-printf '%s\n' "$cwd" > "$state_dir/path"
+def pick_container_name(cwd: str) -> str:
+    base = container_name_base(os.path.basename(cwd))
+    if not base:
+        raise Fail(
+            f"Refusing to run: can't make a container name from ‘{os.path.basename(cwd)}’; pass --name."
+        )
+    for candidate in [base] + [f"{base}-{n}" for n in range(1, 100)]:
+        if not name_taken(candidate):
+            return candidate
+    raise Fail(f"Refusing to run: ‘{base}’ through ‘{base}-99’ are all taken; pass --name.")
 
-if container image list | grep -q '^claude\b'; then
-    echo "Image ‘claude’ already built, reusing."
-else
-    # --no-cache because the Dockerfile pins neither node nor rust, and a cached
-    # layer would keep whatever version it first resolved. See
-    # BUILD_CACHING_IS_PROBLEMATIC.md.
-    "$script_dir/buildbox" --no-cache
-fi
+def image_exists() -> bool:
+    proc = subprocess.run(["container", "image", "list"], stdout=subprocess.PIPE, text=True)
+    if proc.returncode != 0:
+        raise Fail("Refusing to run: `container image list` failed.")
+    return any(re.match(r"claude\b", line) for line in proc.stdout.splitlines())
 
-# Not echoing b/c "-e GH_TOKEN=..." is common, don't want that PAT displayed.
-#echo container run "${container_options[@]}" "$@" claude
-container run "${container_options[@]}" "$@" claude
+def run_container(argv: list) -> int:
+    """`container run`, waited for the way bash waits: Ctrl-C reaches the
+    container, and we don't unmount its token from under it by exiting first."""
+    proc = subprocess.Popen(argv)
+    while True:
+        try:
+            return proc.wait()
+        except KeyboardInterrupt:
+            pass
+
+def cmd_run(args: list) -> int:
+    script_dir = resolve_self().parent
+    try:
+        cwd = os.getcwd()
+    except OSError as e:
+        raise Fail(f"Refusing to run: can't determine the current directory ({e.strerror}).")
+    check_workspace(cwd, script_dir)
+    if shutil.which("container") is None:
+        raise Fail("Refusing to run: no `container` on PATH. Is it installed?")
+
+    # Per-project Claude state (memories, transcripts, login), keyed by host
+    # path so projects don't share it.  `claudebox gc` cleans up after
+    # moved/deleted projects.
+    state_dir = state_root() / state_key(cwd)
+
+    container_options = [
+        "--interactive",
+        "--tty",
+        "--mount", mount_option(cwd, "/workspace"),
+        "--mount", mount_option(state_dir / "claude", "/home/agent/.claude"),
+    ]
+
+    token = keychain_get_token()
+    if not token and sys.stdin.isatty():
+        print("No stored Claude token; ‘claude’ will ask you to /login in the container.")
+        if confirm("Create one now? [y/N] "):
+            try: token = store_token_interactively()
+            except Fail as e: warn(str(e))
+
+    secret_dir = ""
+    try:
+        if token:
+            secret_dir = tempfile.mkdtemp()  # 0700
+            fd = os.open(os.path.join(secret_dir, SECRET_NAME),
+                         os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(token + "\n")
+            container_options += [
+                "--mount", mount_option(secret_dir, SECRET_TARGET, readonly=True)
+            ]
+            creds = state_dir / "claude" / ".credentials.json"
+            if creds.is_file() and sys.stdin.isatty():
+                offer_login_credential_removal(creds)
+
+        # Arguments are passed through untouched, --name included: if you
+        # supplied one that's the name, and a name that's already taken is
+        # `container run`'s complaint to make, not ours.  Only when there's no
+        # --name do we pick one from the directory name, suffixed so that
+        # concurrent boxes don't collide.
+        if not any(a == "--name" or a.startswith("--name=") for a in args):
+            name = pick_container_name(cwd)
+            print(f"Container name: ‘{name}’")
+            container_options += ["--name", name]
+
+        # Side effects only from here on, so a refusal above leaves nothing behind.
+        state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        (state_dir / "claude").mkdir(mode=0o700, exist_ok=True)
+        write_path_file(state_dir, cwd)  # its mtime records the last launch
+
+        if image_exists():
+            print(f"Image ‘{IMAGE}’ already built, reusing.")
+        else:
+            # --no-cache because the Dockerfile pins neither node nor rust, and
+            # a cached layer would keep whatever version it first resolved.
+            # See BUILD_CACHING_IS_PROBLEMATIC.md.
+            build = subprocess.run([str(script_dir / "buildbox"), "--no-cache"])
+            if build.returncode != 0:
+                return build.returncode
+
+        # Not echoing the command b/c "-e GH_TOKEN=..." is common, don't want
+        # that PAT displayed.
+        return run_container(["container", "run"] + container_options + args + [IMAGE])
+    finally:
+        if secret_dir:
+            shutil.rmtree(secret_dir, ignore_errors=True)
+
+
+# ---------- claudebox gc ----------
+def disk_usage(path: Path) -> str:
+    proc = subprocess.run(["/usr/bin/du", "-sh", str(path)],
+                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    return proc.stdout.split("\t")[0] or "?"
+
+def read_path_file(path_file: Path) -> str:
+    return os.fsdecode(path_file.read_bytes().rstrip(b"\n"))
+
+def write_path_file(state_dir: Path, project: str, times_ns=None) -> None:
+    atomic_write(state_dir / "path", os.fsencode(project) + b"\n", times_ns)
+
+def move_state(directory: Path, new_path: str) -> None:
+    dest = directory.parent / state_key(new_path)
+    if dest.exists():
+        warn(f"‘{new_path}’ already has state in ‘{dest}’; skipping.")
+        return
+    os.rename(str(directory), str(dest))
+    # Keep the old mtime: it records the last launch.
+    st = (dest / "path").stat()
+    write_path_file(dest, new_path, (st.st_atime_ns, st.st_mtime_ns))
+    print(f"Moved to ‘{dest}’.")
+
+def new_path_for(tty) -> str:
+    """Ask for a project's new location; "" if it isn't usable."""
+    answer = ask("New path: ", tty)
+    if not answer:
+        return ""
+    path = os.path.realpath(os.path.expanduser(answer))
+    if not os.path.isdir(path):
+        warn(f"‘{path}’ is not a directory; skipping.")
+        return ""
+    try:
+        check_workspace(path, resolve_self().parent)  # what `run` would accept
+    except Fail as e:
+        warn(f"{e} Skipping.")
+        return ""
+    return path
+
+def cmd_gc(args: list) -> int:
+    """List claudebox's per-project Claude state, then offer to delete or
+    re-key the state of each project whose directory no longer exists."""
+    if args:
+        warn("usage: claudebox gc")
+        return 2
+
+    root = state_root()
+    if not root.is_dir():
+        print(f"No claudebox state in ‘{root}’.")
+        return 0
+
+    orphans = []
+    print(f"{'SIZE':>6}  {'LAST-USED':<10}  PROJECT")
+    for directory in sorted(p for p in root.iterdir() if p.is_dir()):
+        size = disk_usage(directory)
+        path_file = directory / "path"
+        if path_file.is_file():
+            try:
+                path = read_path_file(path_file)
+                used = datetime.fromtimestamp(path_file.stat().st_mtime).strftime("%Y-%m-%d")
+            except OSError as e:
+                path, used = f"? (can't read ‘{path_file}’: {e.strerror})", "?"
+            else:
+                if not os.path.isdir(path):
+                    orphans.append((directory, path))
+                    path += " (gone)"
+        else:
+            path, used = f"? (no path file in ‘{directory}’)", "?"
+        print(f"{size:>6}  {used:<10}  {path}")
+
+    if not orphans:
+        return 0
+
+    try:
+        tty = open("/dev/tty", "r")
+    except OSError:
+        warn("\nSome projects are gone, but there's no terminal to ask about them on.")
+        return 1
+
+    with tty:
+        for directory, path in orphans:
+            print()
+            answer = ask(
+                f"‘{path}’ is gone. [d]elete its state, [m]ove it to the project's "
+                "new path, or [s]kip? ", tty)
+            if answer == "d":
+                try:
+                    shutil.rmtree(str(directory))
+                except OSError as e:
+                    warn(f"Couldn't delete ‘{directory}’ ({e.strerror}); left it alone.")
+                else:
+                    print(f"Deleted ‘{directory}’.")
+            elif answer == "m":
+                new_path = new_path_for(tty)
+                if not new_path:
+                    continue
+                try:
+                    move_state(directory, new_path)
+                except OSError as e:
+                    warn(f"Couldn't move ‘{directory}’ ({e.strerror}); left it alone.")
+    return 0
+
+
+# ---------- claudebox token ----------
+
+TOKEN_USAGE = """\
+usage: claudebox token (set|get|status|delete)
+
+  set     run `claude setup-token` and store the token it prints
+  get     print the stored token (exit 1 if there is none)
+  status  say whether a token is stored
+  delete  remove the stored token
+
+The token is not revoked by `delete`; do that at claude.ai > Settings.\
+"""
+
+def need_security() -> None:
+    if not have_security():
+        raise Fail(f"claudebox token: no ‘{SECURITY}’; this needs macOS.")
+
+def store_token_interactively() -> str:
+    need_security()
+    if shutil.which("claude") is None:
+        warn("claudebox token: no `claude` on PATH.")
+        warn("Install Claude Code on this Mac (https://claude.ai/install.sh), or run")
+        warn("`claude setup-token` elsewhere and paste the token here.")
+    else:
+        print("Running `claude setup-token`. It prints a token; copy it, then paste it below.")
+        print()
+        subprocess.run(["claude", "setup-token"])  # its failure is the user's to read
+        print()
+
+    try:
+        token = getpass.getpass("Paste the token: ")
+    except EOFError:
+        token = ""
+
+    # Not a format check on Anthropic's behalf, just a nudge when an obviously
+    # wrong thing (a URL, a login code, a shell prompt) gets pasted.
+    if not token:
+        raise Fail("claudebox token: nothing pasted; keychain unchanged.")
+    if not TOKEN_SAFE.match(token):
+        raise Fail(
+            "claudebox token: that contains spaces or punctuation a token doesn't "
+            "have, so it isn't one; keychain unchanged."
+        )
+    if not token.startswith("sk-ant-"):
+        warn("claudebox token: warning: tokens normally start with ‘sk-ant-’; storing it anyway.")
+
+    keychain_store_token(token)
+    print("Stored. `claudebox` will use it; macOS may ask to allow access the first time.")
+    return token
+
+def cmd_token(args: list) -> int:
+    action = args[0] if args else ""
+    if len(args) > 1:
+        warn(TOKEN_USAGE)
+        return 2
+
+    if action == "set":
+        store_token_interactively()
+        return 0
+    if action == "get":
+        token = keychain_get_token()
+        if not token:
+            warn("claudebox token: no token stored.")
+            return 1
+        print(token)
+        return 0
+    if action == "status":
+        if keychain_get_token():
+            print(f"A token is stored (keychain: {KEYCHAIN_SERVICE}/{KEYCHAIN_ACCOUNT}).")
+            return 0
+        print("No token stored.")
+        return 1
+    if action == "delete":
+        need_security()
+        proc = subprocess.run(
+            [SECURITY, "delete-generic-password", *KEYCHAIN_ITEM],
+            stdout=subprocess.DEVNULL,
+        )
+        if proc.returncode != 0:
+            raise Fail("claudebox token: nothing deleted; is a token stored?")
+        print("Deleted from the keychain. This does NOT revoke it: to do that, sign out of")
+        print("all sessions at claude.ai > Settings.")
+        return 0
+
+    warn(TOKEN_USAGE)
+    return 2
+
+
+# ---------- ENTRY POINT ----------
+USAGE = """\
+usage: claudebox [container-run-option ...]    run Claude in this directory
+       claudebox gc                            list and clean up project state
+       claudebox token (set|get|status|delete)  manage the stored auth token\
+"""
+
+COMMANDS = {"run": cmd_run, "gc": cmd_gc, "token": cmd_token}
+
+def main(argv: list) -> int:
+    # Line buffering keeps our output in step with the subprocesses that share
+    # the terminal (`claude setup-token`, buildbox, `container run`).
+    sys.stdout.reconfigure(line_buffering=True)
+
+    # A bare word is never a valid `container run` option -- the image name is
+    # ours to supply -- so reserving these can't shadow a pass-through argument.
+    first = argv[0] if argv else ""
+    if first in ("help", "-h", "--help"):
+        print(USAGE)
+        return 0
+    command = COMMANDS.get(first)
+    try:
+        return command(argv[1:]) if command else cmd_run(argv)
+    except Fail as e:
+        warn(str(e))
+        return 1
+    except KeyboardInterrupt:
+        return 130
+    except BrokenPipeError:
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        return 141
+    except OSError as e:
+        warn(f"claudebox: {e.strerror}" + (f": ‘{e.filename}’" if e.filename else ""))
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
