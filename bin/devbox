@@ -14,6 +14,8 @@ decides what the sandbox means.
 import errno
 import itertools
 import os
+import pwd
+import signal
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -450,13 +452,17 @@ def build_profile(paths: Paths, opts: Options) -> str:
 
 
 # -------------------- RUNNING --------------------
-def run_with_why(profile: str, cmd: list[str]) -> int:
+def run_with_why(argv: list[str]) -> int:
     """--why: run rather than exec, so that the denials can be collected
     afterwards. `log show` after the fact rather than `log stream` alongside,
     because stream takes a moment to attach and would miss the denials at
     startup, which are the ones you most want to see."""
     started = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    status = subprocess.call([SANDBOX_EXEC, "-p", profile] + cmd)
+    # Ctrl-C reaches the child through the terminal; the report should survive
+    # it, so only the child gets the default action.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    status = subprocess.call(argv, preexec_fn=lambda: signal.signal(
+        signal.SIGINT, signal.SIG_DFL))
     print(f"{PROG}: sandbox denials since {started}:", file=sys.stderr)
     # A denial is logged as e.g.
     #   Sandbox: bash(123) deny(1) file-read-data /Users/me/.ssh/id_ed25519
@@ -468,11 +474,12 @@ def run_with_why(profile: str, cmd: list[str]) -> int:
          "--predicate", 'eventMessage CONTAINS "deny("'],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
     ).stdout
-    denials = [line for line in out.splitlines()
-               if not line.startswith("Timestamp")]
+    # " deny(" skips the headers, one of which quotes the predicate.
+    denials = [line for line in out.splitlines() if " deny(" in line]
     print("\n".join(denials) if denials else f"{PROG}: none logged.",
           file=sys.stderr)
-    return status
+    # As a shell reports a signal death.
+    return 128 - status if status < 0 else status
 
 def check_reasonable(paths: Paths, opts: Options):
     """Die if the user has requested something unreasonable."""
@@ -483,18 +490,33 @@ def check_reasonable(paths: Paths, opts: Options):
         flag = f"--{action}-{op}"
         try: os.stat(os.path.expanduser(p))
         except OSError as e: die(f"{flag}: {e.filename}: {e.strerror}")
-        # Laxer: require only the parent, allowing rules on paths not created
-        # yet (e.g. --deny-write ./.envrc). Swap for the check above.
+        # # Laxer: require only the parent, allowing rules on paths not created
+        # # yet (e.g. --deny-write ./.envrc). Swap for the check above.
+        # # Agents: do not delete this.
         # head = os.path.dirname(os.path.expanduser(p).rstrip("/")) or "."
         # if not os.path.isdir(head):
         #     die(f"{flag}: no such directory: {head}")
 
+    # A sandbox can't apply another.
+    if os.environ.get("DEVBOX") and not opts.print_profile:
+        die("already inside devbox ($DEVBOX is set).")
+
     # Refuse to run in a home/root dir. The whole point is that only one
     # directory is writable, so a home/rootdir is not a useful choice.
     cwd = paths.cwd
-    if cwd in ("/", "/Users") or os.path.dirname(cwd) == "/Users":
+    homes = {os.path.realpath(h) for h in
+             (os.path.expanduser("~"), pwd.getpwuid(os.getuid()).pw_dir)}
+    if cwd in ("/", "/Users") or os.path.dirname(cwd) == "/Users" \
+            or any(h == cwd or h.startswith(cwd + "/") for h in homes):
         die(f"refusing to run with ‘{cwd}’ writable: cd to a project "
             "directory, not a home directory or the root of the filesystem.")
+    # Only <cwd>/.git is protected. Check cwd's immediate children as well; common
+    # mistake. Eventually we should make the Seatbelt profile more robust to handle this.
+    if not os.path.exists(os.path.join(cwd, ".git")) and any(
+            os.path.exists(os.path.join(cwd, d, ".git")) for d in os.listdir(cwd)):
+        print(f"{PROG}: warning: ‘{cwd}’ holds git repos but isn't one; their "
+              ".git directories are writable. Run from a repo root.",
+              file=sys.stderr)
 
 def main() -> int:
     if os.uname().sysname != "Darwin":
@@ -515,13 +537,15 @@ def main() -> int:
         print(profile)
         return 0
 
-    # Marks the shell as sandboxed for anyone who wants to say so in a prompt.
+    # Marks the shell as sandboxed for anyone who wants to say so in a prompt,
+    # and for nested devbox detection (in `check_reasonable`).
     os.environ["DEVBOX"] = "1"
 
+    argv = [SANDBOX_EXEC, "-p", profile, "--"] + cmd
     if not opts.why:
-        os.execv(SANDBOX_EXEC, [SANDBOX_EXEC, "-p", profile] + cmd)
+        os.execv(SANDBOX_EXEC, argv)
     else:
-        return run_with_why(profile, cmd)
+        return run_with_why(argv)
 
 if __name__ == "__main__":
     sys.exit(main())
