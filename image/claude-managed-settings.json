@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(//run/claudebox-secrets/**)",
+      "Read(//home/agent/.claude/.credentials.json)"
+    ]
+  },
+  "sandbox": {
+    "filesystem": {
+      "denyRead": [
+        "/run/claudebox-secrets",
+        "/home/agent/.claude/.credentials.json"
+      ]
+    }
+  }
+}

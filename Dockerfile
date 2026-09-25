@@ -92,6 +92,8 @@ ENV COLORTERM truecolor
 # itself, and one called .gitconfig gets bind-mounted read-only by Claude
 # Code's sandbox, which makes it uneditable and undeletable.
 COPY image/claude-CLAUDE.md /etc/claude-code/CLAUDE.md
+# Managed, so a project's own settings can neither drop nor edit these denies.
+COPY image/claude-managed-settings.json /etc/claude-code/managed-settings.json
 # Defaults the entrypoint merges into $CLAUDE_CONFIG_DIR, which claudebox
 # mounts per project; baking them into ~/.claude would be hidden by that mount.
 COPY image/claude-settings.json /etc/claudebox/settings.json

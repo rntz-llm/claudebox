@@ -11,9 +11,8 @@ in your login keychain. That token can only run models, unlike the ~30-day crede
 `/login` leaves in the project's state, so a prompt injection that reads it gets much less.
 `claudebox` mounts it read-only at `/run/claudebox-secrets`, and the image's `bin/claude`
 hands it to Claude on a pipe; sandboxed commands are denied both it and
-`.credentials.json`. With no token stored, `claudebox` offers to create one and otherwise
-falls back to `/login`. A project whose `settings.json` already sets `permissions.deny`
-keeps its own list, so add the `Read(//run/claudebox-secrets/**)` rule there yourself.
+`.credentials.json` by the image's managed settings. With no token stored, `claudebox`
+offers to create one and otherwise falls back to `/login`.
 
 The first `claudebox` run builds the container image; see `Dockerfile`. Use `buildbox` to
 (re)build the image explicitly. `claudebox` needs python3 >= 3.9, which on a Mac means the
