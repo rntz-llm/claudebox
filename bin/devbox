@@ -232,16 +232,12 @@ def read_config(config_file: str) -> list[Directive]:
 
 # -------------------- POLICY --------------------
 #
-# Reads allowed by default; writes denied by default. "Files my dev environment
-# reads" is long, personal and open-ended, so enumerating it produces a sandbox
-# that breaks constantly and stops being used; "files that are secrets" is short
-# and close to universal. Writes are the opposite: almost nothing legitimately
-# writes outside the repo and its caches, so enumerating those costs little and
-# catches a lot.
+# Writes denied by default except to cwd and temp dirs.
+# Reads allowed by default, except for obvious secret/credential files.
 #
-# The downside is that a secret nobody deny-listed stays readable. With the
-# network off by default that is staged rather than immediate exfiltration,
-# which is the trade being made. See DEVBOX.md.
+# This prioritizes convenience over security on the grounds that any sandbox is better
+# than no sandbox; do not expect devbox to secure your secrets against a deliberate
+# opponent. Use a real VM for that. See DEVBOX.md for more detail.
 
 def default_directives(paths: Paths) -> list[Directive]:
     """The built-in policy, lowest precedence. Last match wins."""
@@ -278,6 +274,10 @@ def default_directives(paths: Paths) -> list[Directive]:
         ("deny",  "read",  "~/.kube"),
         ("deny",  "read",  "~/.docker"),
         ("deny",  "read",  "~/.netrc"),
+        ("deny",  "read",  "~/.git-credentials"),
+        ("deny",  "read",  "~/.config/git/credentials"),
+        ("deny",  "read",  "~/.pgpass"),
+        ("deny",  "read",  "~/.vault-token"),
         ("deny",  "read",  "~/.authinfo"),
         ("deny",  "read",  "~/.authinfo.gpg"),
         ("deny",  "read",  "~/.password-store"),
@@ -285,12 +285,20 @@ def default_directives(paths: Paths) -> list[Directive]:
         ("deny",  "read",  "~/.npmrc"),
         ("deny",  "read",  "~/.pypirc"),
         ("deny",  "read",  "~/.gem/credentials"),
+        ("deny",  "read",  "~/.cargo/credentials"),
         ("deny",  "read",  "~/.cargo/credentials.toml"),
+        ("deny",  "read",  "~/.yarnrc.yml"),
+        ("deny",  "read",  "~/.gradle/gradle.properties"),
+        ("deny",  "read",  "~/.m2/settings.xml"),
+        ("deny",  "read",  "~/.m2/settings-security.xml"),
         ("deny",  "read",  "~/.config/gh"),
         ("deny",  "read",  "~/.config/glab-cli"),
         ("deny",  "read",  "~/.config/op"),
         ("deny",  "read",  "~/.1password"),
         ("deny",  "read",  "~/.claude"),
+        ("deny",  "read",  "~/.claude.json"),
+        ("deny",  "read",  "~/.codex"),
+        ("deny",  "read",  "~/.config/github-copilot"),
         ("deny",  "read",  "~/.config/anthropic"),
         ("deny",  "read",  "~/.local/share/keyrings"),
 
@@ -308,10 +316,22 @@ def default_directives(paths: Paths) -> list[Directive]:
         ("allow", "read",  "~/Library/Android"),
         ("allow", "read",  "~/Library/Python"),
         ("allow", "read",  "~/Library/pnpm"),
-        # ...except the parts of Caches that are somebody's browsing history.
+        ("allow", "read",  "~/Library/Java"),
+        ("allow", "read",  "~/Library/org.swift.swiftpm"),
+        ("allow", "read",  "~/Library/Application Support/pip"),
+        ("allow", "read",  "~/Library/Application Support/pypoetry"),
+        ("deny",  "read",  "~/Library/Application Support/pypoetry/auth.toml"),
+        ("allow", "read",  "~/Library/Application Support/Coursier"),
+        # ...except the parts of Caches that are somebody's browsing or chat history.
         ("deny",  "read",  "~/Library/Caches/com.apple.Safari"),
         ("deny",  "read",  "~/Library/Caches/Google"),
         ("deny",  "read",  "~/Library/Caches/Firefox"),
+        ("deny",  "read",  "~/Library/Caches/Arc"),
+        ("deny",  "read",  "~/Library/Caches/company.thebrowser.Browser"),
+        ("deny",  "read",  "~/Library/Caches/Microsoft Edge"),
+        ("deny",  "read",  "~/Library/Caches/com.microsoft.edgemac"),
+        ("deny",  "read",  "~/Library/Caches/Vivaldi"),
+        ("deny",  "read",  "~/Library/Caches/com.tinyspeck.slackmacgap"),
         ("deny",  "read",  "~/Library/Caches/BraveSoftware"),
 
         # Which paths are protected is itself a hint worth not handing over.

@@ -31,10 +31,11 @@ Writes to current directory; reads anywhere; no network. Exceptions/details:
   delete or rename their files there, `ssh-agent`'s socket included.
 
 - **Reads**: Everything except some well-known private files: `~/.ssh`,
-  `~/.gnupg`, `~/.aws`, `~/.kube`, `~/.docker`, `~/.netrc`, `~/.npmrc`,
+  `~/.gnupg`, `~/.aws`, `~/.kube`, `~/.docker`, `~/.netrc`,
+  `~/.git-credentials`, `~/.npmrc`,
   `~/.config/gh`, `~/.claude` and friends; all of `~/Library`, which holds the
   keychain, your cookies and your mail, with the developer subtrees
-  (`Developer`, `Caches`, `Fonts`, `Android`, `Python`, `pnpm`) given back;
+  (`Developer`, `Caches`, `Fonts`, `Java`, `Python` and more) given back;
   other users' home directories; `/Volumes`, because a mounted Time Machine disk
   is a copy of your home directory. `stat` is permitted everywhere, so
   path-walking still works.
@@ -55,9 +56,11 @@ legitimately writes outside the repo and its caches, so denying by default costs
 little and catches a lot.
 
 The price is that a secret somewhere nobody listed stays readable. Turning the
-network off by default makes exfiltration only slightly harder: e.g. `open
-"https://.../${SECRET}"` is not blocked. *Don't use devbox to contain serious
-attackers; it won't work.*
+network off by default makes exfiltration harder, not impossible. The `open`
+command is denied, but code calling LaunchServices directly can still open
+`https://.../${SECRET}`, other system services likely do DNS lookups and fetches
+on request, and a secret written into the repo leaves with your next push.
+*Don't use devbox to contain serious attackers; it won't work.*
 
 Because the profile is `(allow default)`, almost everything besides files and
 sockets - running programs, mach services, sysctls - is permitted. Starting from
@@ -214,9 +217,6 @@ Other causes:
   install step. Run those outside.
 - **Clang/Swift module cache** is probably not writable, breaking `-fmodules`
   and Swift builds.
-- **Unreadable dev directories**: `~/Library/Java`,
-  `~/Library/org.swift.swiftpm`, `~/Library/Application
-  Support/{pip,pypoetry,Coursier}`. Use `--allow-read`.
 
 If you reach for the same flag twice, put it in `~/.config/devbox/rules`.
 
