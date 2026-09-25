@@ -6,6 +6,10 @@ Think about --clean-env to avoid throwing GH_TOKEN etc into devbox.
 
 Fresh per-run temp dir: mkdtemp(prefix="devbox-") inside DARWIN_USER_TEMP_DIR, allow writes only there, set TMPDIR to it. Keeps sandboxed code away from other processes' files and sockets in T/. Leftovers are cleaned by dirhelper (3 days). Check that Apple tools honour TMPDIR. Also allow network* under it, so tools' own unix sockets work again.
 
+Protect every .git in the working directory, not just <cwd>/.git. Today only <cwd>/.git itself and its config, hooks and modules are denied writes. A nested repo's .git (sub/.git/config, sub/.git/hooks) and a submodule's or worktree's .git file (repointable with "gitdir: ./evil") are writable, and git runs from them when you work in those directories. SBPL takes regexes, so a pinned rule along the lines of
+  (deny file-write* (regex #"^<cwd>/(.*/)?\.git(/(config|hooks|modules)(/|$)|$)"))
+would cover them all. Open questions: escaping <cwd> for the regex; it stops git init / git clone / test suites that create repos inside the working directory (they can't create .git), so maybe exempt $TMPDIR or offer a flag; whether nested repos' configs need write for legit operations. Would let the "holds git repos but isn't one" warning go.
+
 * TODOS
 
 ** make (devbox) go in prompt

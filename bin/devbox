@@ -509,7 +509,6 @@ def main() -> int:
     # and for nested devbox detection (in `check_reasonable`).
     os.environ["DEVBOX"] = "1"
 
-    # "--", or a command starting with "-" would be sandbox-exec's option.
     argv = [SANDBOX_EXEC, "-p", profile, "--"] + cmd
     if not opts.why:
         os.execv(SANDBOX_EXEC, argv)
