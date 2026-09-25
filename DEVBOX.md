@@ -26,9 +26,10 @@ Writes to current directory; reads anywhere; no network. Exceptions/details:
 - **Writes**: The current directory, your per-user temp directory (`getconf
   DARWIN_USER_TEMP_DIR`, even if `$TMPDIR` points elsewhere), `/tmp`,
   `/var/tmp`, and the usual writable character devices. Not `.git/config` or
-  `.git/hooks` either, even though they are inside the writable directory - see
-  below. `/tmp` is shared with your unsandboxed programs, so sandboxed code can
-  delete or rename their files there, `ssh-agent`'s socket included.
+  `.git/hooks` either, nor `.git` itself or `.git/modules`, even though they
+  are inside the writable directory - see below. `/tmp` is shared with your
+  unsandboxed programs, so sandboxed code can delete or rename their files
+  there, bar launchd's socket directories (`ssh-agent`'s).
 
 - **Reads**: Everything except some well-known private files: `~/.ssh`,
   `~/.gnupg`, `~/.aws`, `~/.kube`, `~/.docker`, `~/.netrc`,
@@ -104,9 +105,9 @@ Not worth a sandbox that breaks every autumn.
 - **Damage inside the working directory.** The repo is writable by design. The
   two files your unsandboxed git would execute from - `.git/config`, via
   `core.fsmonitor`, `core.sshCommand` and `diff.*.textconv`, and `.git/hooks` -
-  are denied, but only those: `.git` itself can probably be swapped out, as can
-  a worktree's or submodule's `.git` file, and `.git/modules/*/config` and
-  nested repos are writable. So are `.envrc`, `Makefile`, `package.json`
+  are denied, as are `.git` itself (so it can't be swapped out) and
+  `.git/modules`. A submodule's `.git` file and nested repos are writable, and
+  so are `.envrc`, `Makefile`, `package.json`
   scripts and in-tree hook directories (husky, pre-commit, lefthook), and your
   own tools run those later. Run devbox from the repo root: from `~/src`, every
   repo in it is exposed, and devbox warns.
@@ -145,7 +146,9 @@ The four directives are the four flags: `--allow-read`, `--deny-read`,
 path wins, across reads and writes alike, exactly as SBPL resolves them.
 `--deny-read ~/x --allow-read ~/x/pub` means what it looks like; so does the
 reverse. Precedence runs lowest to highest: the built-in defaults, then the
-config file, then the command line.
+config file, then the command line, then a few pinned denies nothing overrides:
+the devbox config directory, `.git` itself, and `.git/config`, `.git/hooks`
+and `.git/modules`.
 
 **Two directives imply a second.** `allow-write` also permits reads, and
 `deny-read` also forbids writes, at the same position in the sequence:
@@ -168,10 +171,9 @@ what lets `.git/config` stay readable while being unwritable, and `allow-read`
 grants no writes, which is what keeps `~/Library/Caches` readable but not
 writable until you ask.
 
-**Your rules silently override the built-in ones**, and a broad
-`--allow-write` is also a broad `--allow-read`. `--allow-write ~` reopens every
-credential deny; `--allow-write .` reopens `.git/config` and `.git/hooks`;
-`--allow-write ~/.config` lets sandboxed code rewrite your devbox rules.
+**Your rules override the built-in ones**, and a broad `--allow-write` is also
+a broad `--allow-read`: `--allow-write ~` reopens every credential deny. devbox
+warns when a rule reopens a built-in deny other than by naming it exactly.
 
 The working directory is allowed early, ahead of the credential denies, so
 `cd ~/.ssh && devbox` leaves `~/.ssh` shut rather than quietly reopening it —
@@ -213,8 +215,11 @@ Other causes:
   daemons, Python `multiprocessing` managers.
 - **Localhost** is off with the network: Gradle and Bazel daemons, test
   servers.
-- **`.git/config`** isn't writable: `git push -u`, `git remote add`, husky's
-  install step. Run those outside.
+- **`.git`**: `.git/config` isn't writable, breaking `git push -u`, `git remote
+  add` and husky's install step, and `git init` can't create `.git`. Nor is
+  `.git/modules`, where submodules keep their git data, so `git submodule
+  update`, `--recurse-submodules` and committing inside a submodule fail. Run
+  those outside.
 - **Clang/Swift module cache** is probably not writable, breaking `-fmodules`
   and Swift builds.
 
