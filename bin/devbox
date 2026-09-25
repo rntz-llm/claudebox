@@ -223,18 +223,12 @@ def read_config(config_file: str) -> list[Directive]:
 
 # -------------------- POLICY --------------------
 #
-# Reads allowed by default; writes denied by default. "Files my dev environment
-# reads" is long, personal and open-ended, so enumerating it produces a sandbox
-# that breaks constantly and stops being used; "files that are secrets" is short
-# and close to universal. Writes are the opposite: almost nothing legitimately
-# writes outside the repo and its caches, so enumerating those costs little and
-# catches a lot.
+# Writes denied by default except to cwd and temp dirs.
+# Reads allowed by default, except for obvious secret/credential files.
 #
-# The downside is that a secret nobody deny-listed stays readable, and turning
-# the network off only slows its exfiltration: code can still get a daemon
-# outside the sandbox to reach the network for it (LaunchServices through its
-# API opens a URL; other services likely do DNS lookups and fetches on
-# request), or leave the secret in the repo for your next push. See DEVBOX.md.
+# This prioritizes convenience over security on the grounds that any sandbox is better
+# than no sandbox; do not expect devbox to secure your secrets against a deliberate
+# opponent. Use a real VM for that. See DEVBOX.md for more detail.
 
 def default_directives(paths: Paths) -> list[Directive]:
     """The built-in policy, lowest precedence. Last match wins."""
