@@ -349,7 +349,8 @@ def pinned_directives(paths: Paths) -> list[Directive]:
         # Denying the write only: git has to be able to read its own config.
         ("deny",  "write", f"{paths.cwd}/.git/hooks"),
         ("deny",  "write", f"{paths.cwd}/.git/config"),
-        # Submodules' hooks and config.
+        # Submodules' git dirs, each with its own config and hooks, which run
+        # when e.g. `git status` in the superproject recurses into them.
         ("deny",  "write", f"{paths.cwd}/.git/modules"),
     ]
 

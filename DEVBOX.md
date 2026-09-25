@@ -216,8 +216,10 @@ Other causes:
 - **Localhost** is off with the network: Gradle and Bazel daemons, test
   servers.
 - **`.git`**: `.git/config` isn't writable, breaking `git push -u`, `git remote
-  add` and husky's install step, and `git init` can't create `.git`. Run those
-  outside.
+  add` and husky's install step, and `git init` can't create `.git`. Nor is
+  `.git/modules`, where submodules keep their git data, so `git submodule
+  update`, `--recurse-submodules` and committing inside a submodule fail. Run
+  those outside.
 - **Clang/Swift module cache** is probably not writable, breaking `-fmodules`
   and Swift builds.
 
