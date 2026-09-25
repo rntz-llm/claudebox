@@ -9,6 +9,7 @@ Fresh per-run temp dir: mkdtemp(prefix="devbox-") inside DARWIN_USER_TEMP_DIR, a
 Protect every .git in the working directory, not just <cwd>/.git. Today only <cwd>/.git itself and its config, hooks and modules are denied writes. A nested repo's .git (sub/.git/config, sub/.git/hooks) and a submodule's or worktree's .git file (repointable with "gitdir: ./evil") are writable, and git runs from them when you work in those directories. SBPL takes regexes, so a pinned rule along the lines of
   (deny file-write* (regex #"^<cwd>/(.*/)?\.git(/(config|hooks|modules)(/|$)|$)"))
 would cover them all. Open questions: escaping <cwd> for the regex; it stops git init / git clone / test suites that create repos inside the working directory (they can't create .git), so maybe exempt $TMPDIR or offer a flag; whether nested repos' configs need write for legit operations. Would let the "holds git repos but isn't one" warning go.
+The same regex approach could narrow the .git/modules deny to submodules' config and hooks only, e.g. ^<cwd>/\.git/modules/([^/]+/modules/)*[^/]+/(config|hooks)(/|$), so that git submodule update, --recurse-submodules and committing inside a submodule work again.
 
 * TODOS
 
