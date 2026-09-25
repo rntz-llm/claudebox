@@ -261,6 +261,11 @@ def default_directives(paths: Paths) -> list[Directive]:
         ("deny",  "read",  "/Volumes"),
         # Local account password hashes.
         ("deny",  "read",  "/private/var/db/dslocal"),
+        # Denied running in the profile; unreadable too, so that they can't be
+        # copied elsewhere and run from there.
+        ("deny",  "read",  "/usr/bin/open"),
+        ("deny",  "read",  "/usr/bin/osascript"),
+        ("deny",  "read",  "/bin/launchctl"),
 
         # Credentials and keys.
         ("deny",  "read",  "~/.ssh"),
@@ -399,7 +404,21 @@ PROFILE = '''(version 1)
 ;; ---- terminal ----
 ;; TIOCSTI, _IOW('t', 114, char), pushes bytes into your terminal's input
 ;; queue, which your shell reads and runs, unsandboxed, once devbox exits.
-(deny file-ioctl (ioctl-command #x80017472))'''
+(deny file-ioctl (ioctl-command #x80017472))
+
+;; ---- asking something outside the sandbox to act for you ----
+;; What a system service starts or writes for you is not bound by this profile.
+;; open (LaunchServices), osascript (Apple Events) and launchctl (launchd) are
+;; how scripts ask. Code calling LaunchServices or launchd directly still can.
+(deny process-exec
+      (literal "/usr/bin/open")
+      (literal "/usr/bin/osascript")
+      (literal "/bin/launchctl"))
+;; These two are checked by the daemon doing the work, so they hold however it
+;; is asked. Preferences are written by cfprefsd, and could set e.g. your
+;; terminal's startup command.
+(deny appleevent-send)
+(deny user-preference-write)'''
 
 NO_NETWORK = '''
 
